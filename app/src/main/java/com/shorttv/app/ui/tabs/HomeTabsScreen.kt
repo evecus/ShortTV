@@ -1,6 +1,9 @@
 package com.shorttv.app.ui.tabs
 
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -29,6 +32,17 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.focus.FocusDirection
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
+import kotlinx.coroutines.delay
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
@@ -76,6 +90,43 @@ fun HomeTabsScreen(
     var selected by rememberSaveable { mutableIntStateOf(0) }
     val deviceMode = LocalDeviceMode.current
 
+    // ---- TV 沉浸模式：推荐页顶部栏自动隐藏 ----
+    val density = LocalDensity.current
+    val focusManager = LocalFocusManager.current
+    var barVisible by remember { mutableStateOf(true) }      // 推荐页上顶部栏是否显示
+    var barHasFocus by remember { mutableStateOf(false) }
+    var barHeight by remember { mutableStateOf(0.dp) }
+    var interaction by remember { mutableIntStateOf(0) }      // 遥控器操作后重置隐藏计时
+    var focusTick by remember { mutableIntStateOf(0) }        // 递增 = 请求把焦点交给顶部栏
+    val barRequester = remember { FocusRequester() }
+
+    fun hideBar() {
+        // 先把焦点还给播放器，否则顶部栏移除后遥控器按键会丢失
+        if (barHasFocus) focusManager.moveFocus(FocusDirection.Down)
+        barVisible = false
+    }
+
+    // 推荐页：顶部栏显示 5 秒无操作后自动隐藏
+    LaunchedEffect(selected, barVisible, interaction) {
+        if (deviceMode == DeviceMode.TV && selected == 0 && barVisible) {
+            delay(5000)
+            hideBar()
+        }
+    }
+    LaunchedEffect(focusTick) {
+        if (focusTick > 0) {
+            delay(80)
+            runCatching { barRequester.requestFocus() }
+        }
+    }
+    // 推荐页全屏播放时按返回键 = 唤出顶部栏（再按一次才退出应用）
+    androidx.activity.compose.BackHandler(
+        enabled = deviceMode == DeviceMode.TV && selected == 0 && !barVisible
+    ) {
+        barVisible = true
+        focusTick++
+    }
+
     // 返回键：非首页页签先回首页
     androidx.activity.compose.BackHandler(enabled = selected != 0) {
         selected = 0
@@ -122,30 +173,54 @@ fun HomeTabsScreen(
             BottomNavBar(selected = selected, onSelect = { selected = it })
         }
     } else {
-        // TV：顶部页签栏（原有布局）
-        Column(modifier = Modifier.fillMaxSize().background(Color(0xFF0F0F12))) {
-            TopTabBar(
-                selected = selected,
-                onSelect = { selected = it }
-            )
-            Box(modifier = Modifier.fillMaxSize()) {
-                AnimatedContent(
-                    targetState = selected,
-                    transitionSpec = {
-                        fadeIn(tween(200)) togetherWith fadeOut(tween(200))
+        // TV：推荐页沉浸全屏（顶部栏浮层，自动隐藏）；其它页签顶部栏常驻
+        val immersive = selected == 0
+        val showBar = !immersive || barVisible
+        Box(modifier = Modifier.fillMaxSize().background(Color(0xFF0F0F12))) {
+            AnimatedContent(
+                targetState = selected,
+                transitionSpec = {
+                    fadeIn(tween(200)) togetherWith fadeOut(tween(200))
+                },
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(top = if (immersive) 0.dp else barHeight),
+                label = "tabContentTv"
+            ) { tab ->
+                TabContent(
+                    tab = tab,
+                    vm = vm,
+                    onOpenLive = onOpenLive,
+                    onOpenUser = onOpenUser,
+                    onOpenMix = onOpenMix,
+                    onOpenPlaylist = onOpenPlaylist,
+                    onOpenCollect = onOpenCollect
+                )
+            }
+            AnimatedVisibility(
+                visible = showBar,
+                modifier = Modifier.align(Alignment.TopCenter),
+                enter = slideInVertically { -it } + fadeIn(tween(200)),
+                exit = slideOutVertically { -it } + fadeOut(tween(200))
+            ) {
+                TopTabBar(
+                    selected = selected,
+                    onSelect = {
+                        selected = it
+                        barVisible = true
+                        interaction++
                     },
-                    label = "tabContentTv"
-                ) { tab ->
-                    TabContent(
-                        tab = tab,
-                        vm = vm,
-                        onOpenLive = onOpenLive,
-                        onOpenUser = onOpenUser,
-                        onOpenMix = onOpenMix,
-                        onOpenPlaylist = onOpenPlaylist,
-                        onOpenCollect = onOpenCollect
-                    )
-                }
+                    selectedRequester = barRequester,
+                    translucent = immersive,
+                    modifier = Modifier
+                        .onSizeChanged { barHeight = with(density) { it.height.toDp() } }
+                        .onFocusChanged {
+                            // 推荐页：焦点从顶部栏移走（按下键回到视频）即隐藏
+                            if (immersive && barHasFocus && !it.hasFocus) barVisible = false
+                            barHasFocus = it.hasFocus
+                        }
+                        .onPreviewKeyEvent { interaction++; false }
+                )
             }
         }
     }
@@ -224,11 +299,17 @@ private fun BottomNavBar(selected: Int, onSelect: (Int) -> Unit) {
 }
 
 @Composable
-private fun TopTabBar(selected: Int, onSelect: (Int) -> Unit) {
+private fun TopTabBar(
+    selected: Int,
+    onSelect: (Int) -> Unit,
+    selectedRequester: FocusRequester? = null,
+    translucent: Boolean = false,
+    modifier: Modifier = Modifier
+) {
     Row(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
-            .background(Color(0xFF14141A))
+            .background(if (translucent) Color(0xE614141A) else Color(0xFF14141A))
             .padding(horizontal = 24.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -263,6 +344,7 @@ private fun TopTabBar(selected: Int, onSelect: (Int) -> Unit) {
                 TabItem(
                     tab = tab,
                     selected = selected == index,
+                    focusRequester = if (selected == index) selectedRequester else null,
                     onClick = { onSelect(index) }
                 )
             }
@@ -271,11 +353,17 @@ private fun TopTabBar(selected: Int, onSelect: (Int) -> Unit) {
 }
 
 @Composable
-private fun TabItem(tab: Tab, selected: Boolean, onClick: () -> Unit) {
+private fun TabItem(
+    tab: Tab,
+    selected: Boolean,
+    focusRequester: FocusRequester? = null,
+    onClick: () -> Unit
+) {
     val bg = if (selected) Color(0xFFE5394F) else Color.Transparent
     val fg = if (selected) Color.White else Color(0xFFA9A9B8)
     Row(
         modifier = Modifier
+            .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
             .tvClickable(focusedScale = 1.08f, onClick = onClick)
             .clip(RoundedCornerShape(20.dp))
             .background(bg)
