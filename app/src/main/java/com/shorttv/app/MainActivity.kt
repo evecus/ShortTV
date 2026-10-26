@@ -1,7 +1,6 @@
 package com.shorttv.app
 
 import android.app.PictureInPictureParams
-import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.util.Rational
@@ -16,6 +15,7 @@ import com.shorttv.app.ui.AppRoot
 import com.shorttv.app.ui.DeviceMode
 import com.shorttv.app.ui.LocalDeviceMode
 import com.shorttv.app.ui.MainViewModel
+import com.shorttv.app.ui.detectDeviceMode
 import com.shorttv.app.ui.theme.ShortTVTheme
 
 class MainActivity : ComponentActivity() {
@@ -25,8 +25,7 @@ class MainActivity : ComponentActivity() {
 
     /** 设备形态：TV（Leanback）横屏 / 手机竖屏，锁定后不再随传感器旋转。 */
     private val deviceMode: DeviceMode by lazy {
-        if (packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK))
-            DeviceMode.TV else DeviceMode.MOBILE
+        detectDeviceMode(this)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {

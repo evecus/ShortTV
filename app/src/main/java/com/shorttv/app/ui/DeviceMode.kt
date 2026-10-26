@@ -24,10 +24,17 @@ fun detectDeviceMode(context: Context): DeviceMode {
     val pm = context.packageManager
     val uiMode = (context.getSystemService(Context.UI_MODE_SERVICE) as? UiModeManager)
         ?.currentModeType
+    val cfg = context.resources.configuration
     val isTv =
         pm.hasSystemFeature(PackageManager.FEATURE_TELEVISION) ||
             pm.hasSystemFeature(PackageManager.FEATURE_LEANBACK) ||
             uiMode == Configuration.UI_MODE_TYPE_TELEVISION ||
-            !pm.hasSystemFeature(PackageManager.FEATURE_TOUCHSCREEN)
+            !pm.hasSystemFeature(PackageManager.FEATURE_TOUCHSCREEN) ||
+            // 部分电视谎报有触摸屏：用实际输入配置兜底（遥控器 = D-pad / 无触摸）
+            cfg.touchscreen == Configuration.TOUCHSCREEN_NOTOUCH ||
+            cfg.navigation == Configuration.NAVIGATION_DPAD ||
+            // 无电话功能 + 大屏横向 + 无触摸支持的盒子
+            (!pm.hasSystemFeature(PackageManager.FEATURE_TELEPHONY) &&
+                !pm.hasSystemFeature(PackageManager.FEATURE_TOUCHSCREEN_MULTITOUCH))
     return if (isTv) DeviceMode.TV else DeviceMode.MOBILE
 }
