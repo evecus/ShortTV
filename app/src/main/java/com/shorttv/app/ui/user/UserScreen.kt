@@ -12,15 +12,18 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -39,6 +42,8 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
 import com.shorttv.app.data.model.Author
+import com.shorttv.app.ui.DeviceMode
+import com.shorttv.app.ui.LocalDeviceMode
 import com.shorttv.app.ui.MainViewModel
 import com.shorttv.app.ui.components.EmptyHint
 import com.shorttv.app.ui.components.LoadingBox
@@ -58,18 +63,28 @@ fun UserScreen(
     modifier: Modifier = Modifier
 ) {
     val userPage by vm.userPage.collectAsStateWithLifecycle()
+    val userLoading by vm.userLoading.collectAsStateWithLifecycle()
+    val userError by vm.userError.collectAsStateWithLifecycle()
     var following by remember { mutableStateOf(false) }
 
     LaunchedEffect(secUid) { vm.loadUser(secUid) }
 
     val page = userPage
     if (page == null) {
-        LoadingBox(modifier)
+        if (userLoading) LoadingBox(modifier)
+        else EmptyHint(text = userError ?: "作者主页加载失败", modifier = modifier) { vm.loadUser(secUid) }
         return
     }
 
     val author: Author = page.user ?: page.items.firstOrNull()?.author
-        ?: return EmptyHint(text = "用户不存在", modifier = modifier)
+        ?: return EmptyHint(
+            text = userError ?: "作者资料暂不可用",
+            modifier = modifier,
+            onRetry = { vm.loadUser(secUid) }
+        )
+
+    val deviceMode = LocalDeviceMode.current
+    val topInset = if (deviceMode == DeviceMode.MOBILE) Modifier.statusBarsPadding() else Modifier
 
     Column(modifier = modifier.fillMaxSize()) {
         // 顶部返回
@@ -77,6 +92,7 @@ fun UserScreen(
             modifier = Modifier
                 .fillMaxWidth()
                 .background(Color(0xFF14141A))
+                .then(topInset)
                 .padding(horizontal = 16.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
@@ -131,10 +147,12 @@ fun UserScreen(
                     Spacer(Modifier.height(8.dp))
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(24.dp)) {
-                    StatItem("获赞", formatCount(author.totalFavorited))
-                    StatItem("关注", formatCount(author.followingCount))
-                    StatItem("粉丝", formatCount(author.followerCount))
-                    StatItem("作品", formatCount(author.awemeCount))
+                    // 移动端 feed 内嵌作者不带统计字段；未配置登录 Cookie 时以「—」占位，
+                    // 配置后资料接口返回真实数值
+                    StatItem("获赞", author.totalFavorited.takeIf { it > 0 }?.let(::formatCount) ?: "—")
+                    StatItem("关注", author.followingCount.takeIf { it > 0 }?.let(::formatCount) ?: "—")
+                    StatItem("粉丝", author.followerCount.takeIf { it > 0 }?.let(::formatCount) ?: "—")
+                    StatItem("作品", author.awemeCount.takeIf { it > 0 }?.let(::formatCount) ?: "—")
                 }
             }
             Box(
@@ -156,7 +174,7 @@ fun UserScreen(
 
         // 作品网格
         if (page.items.isEmpty()) {
-            EmptyHint(text = "暂无作品")
+            EmptyHint(text = if (userError != null) "作品列表暂不可用（接口受限）" else "暂无作品")
         } else {
             Text(
                 text = "作品 ${page.items.size}",
@@ -180,6 +198,37 @@ fun UserScreen(
                             onOpenPlaylist(author.nickname, page.items.indexOf(aweme))
                         }
                     )
+                }
+                if (page.hasMore || userLoading) {
+                    item(
+                        key = "user_works_footer",
+                        span = { GridItemSpan(maxLineSpan) }
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .then(
+                                    if (page.hasMore && !userLoading) {
+                                        Modifier.tvClickable(onClick = { vm.loadMoreUserWorks() })
+                                    } else Modifier
+                                )
+                                .padding(vertical = 16.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            if (userLoading) {
+                                CircularProgressIndicator(
+                                    color = Color(0xFFE5394F),
+                                    modifier = Modifier.size(28.dp)
+                                )
+                            } else {
+                                Text(
+                                    text = "加载更多作品",
+                                    color = Color(0xFFE5394F),
+                                    style = MaterialTheme.typography.labelLarge
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }

@@ -38,7 +38,9 @@ data class AppSettings(
     val autoPlayNext: Boolean = true,
     val defaultQualityH265: Boolean = false,
     val pipOnLeave: Boolean = true,
-    val historyResume: Boolean = true
+    val historyResume: Boolean = true,
+    /** 用户自己的抖音 Web 登录 Cookie（可选）。配置后搜索、作者统计/作品、评论分页可用。 */
+    val userCookie: String = ""
 )
 
 class SettingsRepository(private val context: Context) {
@@ -55,6 +57,7 @@ class SettingsRepository(private val context: Context) {
         val H265 = booleanPreferencesKey("default_h265")
         val PIP = booleanPreferencesKey("pip_on_leave")
         val RESUME = booleanPreferencesKey("history_resume")
+        val USER_COOKIE = stringPreferencesKey("user_cookie")
     }
 
     val settings: Flow<AppSettings> = context.dataStore.data.map { prefs ->
@@ -71,7 +74,8 @@ class SettingsRepository(private val context: Context) {
             autoPlayNext = prefs[Keys.AUTOPLAY] ?: true,
             defaultQualityH265 = prefs[Keys.H265] ?: false,
             pipOnLeave = prefs[Keys.PIP] ?: true,
-            historyResume = prefs[Keys.RESUME] ?: true
+            historyResume = prefs[Keys.RESUME] ?: true,
+            userCookie = prefs[Keys.USER_COOKIE] ?: ""
         )
     }
 
@@ -117,6 +121,10 @@ class SettingsRepository(private val context: Context) {
 
     suspend fun setHistoryResume(value: Boolean) {
         context.dataStore.edit { it[Keys.RESUME] = value }
+    }
+
+    suspend fun setUserCookie(value: String) {
+        context.dataStore.edit { it[Keys.USER_COOKIE] = value.trim() }
     }
 }
 

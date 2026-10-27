@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -176,6 +177,8 @@ fun LivePlayerScreen(
         // 直播弹幕
         DanmakuOverlay(
             source = danmakuController.items,
+            playbackPositionMs = danmakuController.items.size * 750L,
+            isPlaying = true,
             enabled = settings.danmakuEnabled,
             fontSizeSp = settings.danmakuSize,
             alpha = settings.danmakuAlpha,
@@ -183,10 +186,15 @@ fun LivePlayerScreen(
             modifier = Modifier.fillMaxSize()
         )
 
-        // 顶部：返回 + 房间信息
+        // 顶部：返回 + 房间信息（手机端避开系统状态栏）
+        val deviceMode = com.shorttv.app.ui.LocalDeviceMode.current
+        val topInset = if (deviceMode == com.shorttv.app.ui.DeviceMode.MOBILE) {
+            Modifier.statusBarsPadding()
+        } else Modifier
         Row(
             modifier = Modifier
                 .align(Alignment.TopStart)
+                .then(topInset)
                 .padding(16.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
@@ -237,6 +245,7 @@ fun LivePlayerScreen(
         Row(
             modifier = Modifier
                 .align(Alignment.TopEnd)
+                .then(topInset)
                 .padding(16.dp),
             horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {

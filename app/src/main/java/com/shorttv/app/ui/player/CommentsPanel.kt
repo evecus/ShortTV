@@ -19,6 +19,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -46,13 +47,16 @@ import com.shorttv.app.util.formatRelativeTime
 @Composable
 fun CommentsPanel(
     comments: List<Comment>,
+    loading: Boolean,
+    hasMore: Boolean,
+    onLoadMore: () -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .background(Color(0xF20F0F12))
+            .background(Color(0xFF0F0F12))
             .padding(horizontal = 20.dp, vertical = 14.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -85,11 +89,15 @@ fun CommentsPanel(
                     .height(160.dp),
                 contentAlignment = Alignment.Center
             ) {
-                Text(
-                    text = "还没有评论，来抢沙发～",
-                    color = Color(0xFFA9A9B8),
-                    style = MaterialTheme.typography.bodyMedium
-                )
+                if (loading) {
+                    CircularProgressIndicator(color = Color(0xFFE5394F), modifier = Modifier.size(28.dp))
+                } else {
+                    Text(
+                        text = "暂无可用评论",
+                        color = Color(0xFFA9A9B8),
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
             }
         } else {
             LazyColumn(
@@ -98,6 +106,35 @@ fun CommentsPanel(
             ) {
                 items(comments, key = { it.commentId }) { comment ->
                     CommentRow(comment)
+                }
+                item(key = "comments_footer") {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .then(
+                                if (hasMore && !loading) Modifier.tvClickable(onClick = onLoadMore)
+                                else Modifier
+                            )
+                            .padding(vertical = 10.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        when {
+                            loading -> CircularProgressIndicator(
+                                color = Color(0xFFE5394F),
+                                modifier = Modifier.size(24.dp)
+                            )
+                            hasMore -> Text(
+                                text = "加载更多评论",
+                                color = Color(0xFFE5394F),
+                                style = MaterialTheme.typography.labelLarge
+                            )
+                            else -> Text(
+                                text = "已加载全部评论",
+                                color = Color(0xFF666677),
+                                style = MaterialTheme.typography.labelSmall
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -109,7 +146,7 @@ private fun CommentRow(comment: Comment) {
     var liked by remember { mutableStateOf(false) }
     Row(modifier = Modifier.fillMaxWidth()) {
         AsyncImage(
-            model = comment.userAvatar.ifBlank { "https://picsum.photos/seed/${comment.commentId}/100/100" },
+            model = comment.userAvatar.ifBlank { null },
             contentDescription = null,
             contentScale = ContentScale.Crop,
             modifier = Modifier
@@ -134,7 +171,11 @@ private fun CommentRow(comment: Comment) {
             )
             Spacer(Modifier.height(3.dp))
             Text(
-                text = formatRelativeTime(comment.createTime),
+                text = buildString {
+                    append(formatRelativeTime(comment.createTime))
+                    if (comment.ipLabel.isNotBlank()) append(" · ${comment.ipLabel}")
+                    if (comment.replyCount > 0) append(" · ${comment.replyCount} 条回复")
+                },
                 color = Color(0xFF666677),
                 style = MaterialTheme.typography.labelSmall
             )

@@ -51,6 +51,11 @@ class DouyinIdentity private constructor(context: Context) {
             return sb.substring(0, length)
         }
 
+        private fun randomDigits(length: Int): String {
+            val r = java.util.Random()
+            return (1..length).joinToString("") { r.nextInt(10).toString() }
+        }
+
         fun md5Upper(input: String): String {
             val digest = MessageDigest.getInstance("MD5").digest(input.toByteArray(Charsets.UTF_8))
             return digest.joinToString("") { "%02x".format(it) }.uppercase()
@@ -108,10 +113,37 @@ class DouyinIdentity private constructor(context: Context) {
             prefs.edit().putString("user_unique_id", it).apply()
         }
 
+    /** 移动端 App feed 设备参数（持久化，保持推荐流身份稳定）。 */
+    val appDeviceId: String
+        get() = prefs.getString("app_device_id", null) ?: randomDigits(19).also {
+            prefs.edit().putString("app_device_id", it).apply()
+        }
+
+    val appIid: String
+        get() = prefs.getString("app_iid", null) ?: randomDigits(19).also {
+            prefs.edit().putString("app_iid", it).apply()
+        }
+
+    val appOpenudid: String
+        get() = prefs.getString("app_openudid", null) ?: randomHex(16).also {
+            prefs.edit().putString("app_openudid", it).apply()
+        }
+
+    /**
+     * 用户自己的抖音 Web 登录 Cookie（可选，来自设置页）。
+     * 配置后搜索、作者资料/作品、评论分页等需要登录态的接口可用；
+     * 仅使用用户自己账号的会话，不做任何登录绕过。
+     */
+    @Volatile
+    var userCookie: String = ""
+
     /** 拼接 Cookie 头。 */
-    fun cookieHeader(): String = buildString {
-        ttwid?.let { append("ttwid=$it; ") }
-        append("__ac_nonce=${randomAlnum(21)}")
+    fun cookieHeader(): String {
+        if (userCookie.isNotBlank()) return userCookie
+        return buildString {
+            ttwid?.let { append("ttwid=$it; ") }
+            append("__ac_nonce=${randomAlnum(21)}")
+        }
     }
 
     /** 本地生成 msToken（126 位字母数字 + "=="，与 myDV 一致）。 */

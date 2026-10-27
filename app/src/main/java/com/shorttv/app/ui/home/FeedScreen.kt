@@ -15,7 +15,6 @@ import com.shorttv.app.ui.MainViewModel
 import com.shorttv.app.ui.components.EmptyHint
 import com.shorttv.app.ui.components.LoadingBox
 import com.shorttv.app.ui.player.FeedPlayerPage
-import com.shorttv.app.ui.player.rememberDripDanmaku
 import kotlinx.coroutines.launch
 
 /**
@@ -34,6 +33,8 @@ fun FeedScreen(
     val settings by vm.settings.collectAsStateWithLifecycle()
     val danmakuAll by vm.danmaku.collectAsStateWithLifecycle()
     val comments by vm.comments.collectAsStateWithLifecycle()
+    val commentsLoading by vm.commentsLoading.collectAsStateWithLifecycle()
+    val commentsHasMore by vm.commentsHasMore.collectAsStateWithLifecycle()
 
     LaunchedEffect(Unit) {
         if (feed.isEmpty()) vm.refreshFeed()
@@ -51,6 +52,8 @@ fun FeedScreen(
             feed = feed,
             danmakuAll = danmakuAll,
             comments = comments,
+            commentsLoading = commentsLoading,
+            commentsHasMore = commentsHasMore,
             settings = settings,
             onOpenUser = onOpenUser,
             onOpenMix = onOpenMix,
@@ -65,6 +68,8 @@ private fun FeedPager(
     feed: List<com.shorttv.app.data.model.Aweme>,
     danmakuAll: List<com.shorttv.app.data.model.DanmakuItem>,
     comments: List<com.shorttv.app.data.model.Comment>,
+    commentsLoading: Boolean,
+    commentsHasMore: Boolean,
     settings: com.shorttv.app.data.AppSettings,
     onOpenUser: (String) -> Unit,
     onOpenMix: (String) -> Unit,
@@ -80,12 +85,6 @@ private fun FeedPager(
         }
     }
 
-    // 当前页激活时请求弹幕
-    val currentAwemeId = feed.getOrNull(pagerState.settledPage)?.awemeId
-    LaunchedEffect(currentAwemeId) {
-        currentAwemeId?.let { vm.loadDanmaku(it) }
-    }
-
     Box(modifier = modifier.fillMaxSize()) {
         VerticalPager(
             state = pagerState,
@@ -93,10 +92,6 @@ private fun FeedPager(
         ) { page ->
             val aweme = feed[page]
             val active = page == pagerState.settledPage
-            val danmakuSource = rememberDripDanmaku(
-                all = if (active) danmakuAll else emptyList(),
-                active = active
-            )
             fun goPage(target: Int) {
                 if (target in feed.indices) {
                     scope.launch { pagerState.animateScrollToPage(target) }
@@ -109,20 +104,30 @@ private fun FeedPager(
                 isActive = active,
                 settings = settings,
                 history = vm.history,
-                danmakuSource = danmakuSource,
+                danmakuSource = if (active) danmakuAll else emptyList(),
                 comments = if (active) comments else emptyList(),
-                onRequestDanmaku = { vm.loadDanmaku(aweme.awemeId) },
+                commentsLoading = active && commentsLoading,
+                commentsHasMore = active && commentsHasMore,
+                onRequestDanmaku = { vm.loadDanmaku(aweme.awemeId, aweme.video.duration.toLong()) },
                 onToggleDanmaku = { vm.setDanmakuEnabled(!settings.danmakuEnabled) },
                 onOpenComments = { vm.loadComments(aweme.awemeId) },
-                onAuthorClick = { onOpenUser(aweme.author.secUid) },
+                onLoadMoreComments = { vm.loadMoreComments() },
+                onAuthorClick = {
+                    // 点击瞬间缓存视频内嵌的作者数据，作者主页不依赖额外接口
+                    vm.cacheAuthor(aweme.author)
+                    onOpenUser(aweme.author.secUid)
+                },
                 onMixClick = aweme.mixInfo?.let { { onOpenMix(it.mixId) } },
                 // TV 全屏播放时遥控器上下键切换视频
                 onSwipeUp = { goPage(page - 1) },
                 onSwipeDown = { goPage(page + 1) },
                 onEnded = {
-                    if (settings.autoPlayNext && page < feed.lastIndex) {
-                        scope.launch {
-                            pagerState.animateScrollToPage(page + 1)
+                    if (settings.autoPlayNext) {
+                        if (page < feed.lastIndex) {
+                            scope.launch { pagerState.animateScrollToPage(page + 1) }
+                        } else {
+                            // 已是最后一条：预加载更多，连播不断流
+                            vm.loadMoreFeed()
                         }
                     }
                 }

@@ -34,7 +34,7 @@ import coil.compose.AsyncImage
 import com.shorttv.app.data.model.Aweme
 import com.shorttv.app.data.model.LiveRoom
 import com.shorttv.app.util.formatCount
-import com.shorttv.app.util.formatDuration
+import com.shorttv.app.util.formatMs
 
 /** 视频网格卡片（搜索结果 / 用户作品 / 合集） */
 @Composable
@@ -73,7 +73,7 @@ fun VideoCard(
                     .padding(horizontal = 5.dp, vertical = 2.dp)
             ) {
                 Text(
-                    text = formatDuration(aweme.video.duration),
+                    text = formatMs(aweme.video.duration.toLong()),
                     color = Color.White,
                     style = MaterialTheme.typography.labelSmall
                 )
@@ -299,7 +299,7 @@ fun EpisodeCard(
             )
             Spacer(Modifier.height(2.dp))
             Text(
-                text = formatDuration(aweme.video.duration),
+                text = formatMs(aweme.video.duration.toLong()),
                 color = Color(0xFFA9A9B8),
                 style = MaterialTheme.typography.labelSmall
             )

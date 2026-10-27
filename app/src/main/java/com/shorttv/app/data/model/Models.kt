@@ -192,14 +192,17 @@ data class LiveQuality(
     val level: Int = 0
 )
 
-/** 弹幕 / 直播聊天消息 */
+/** 点播弹幕 / 直播聊天消息 */
 @Serializable
 data class DanmakuItem(
     val id: String = "",
     val content: String = "",
     @SerialName("user_nickname") val userNickname: String = "",
     val color: String = "#FFFFFF",
-    val self: Boolean = false
+    val self: Boolean = false,
+    /** 点播弹幕相对视频起点的毫秒偏移；直播消息保持为 0。 */
+    @SerialName("offset_time") val offsetTimeMs: Long = 0L,
+    @SerialName("digg_count") val diggCount: Long = 0L
 )
 
 /** 评论 */
@@ -210,7 +213,9 @@ data class Comment(
     @SerialName("user_nickname") val userNickname: String = "",
     @SerialName("user_avatar") val userAvatar: String = "",
     @SerialName("create_time") val createTime: Long = 0L,
-    @SerialName("digg_count") val diggCount: Long = 0L
+    @SerialName("digg_count") val diggCount: Long = 0L,
+    @SerialName("reply_comment_total") val replyCount: Long = 0L,
+    @SerialName("ip_label") val ipLabel: String = ""
 )
 
 // ---------- 接口响应包装 ----------

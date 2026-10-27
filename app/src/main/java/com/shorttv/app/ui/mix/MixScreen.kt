@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.CircleShape
@@ -33,6 +34,8 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
+import com.shorttv.app.ui.DeviceMode
+import com.shorttv.app.ui.LocalDeviceMode
 import com.shorttv.app.ui.MainViewModel
 import com.shorttv.app.ui.components.EpisodeCard
 import com.shorttv.app.ui.components.EmptyHint
@@ -60,12 +63,16 @@ fun MixScreen(
         return
     }
 
+    val deviceMode = LocalDeviceMode.current
+    val topInset = if (deviceMode == DeviceMode.MOBILE) Modifier.statusBarsPadding() else Modifier
+
     Column(modifier = modifier.fillMaxSize()) {
         // 顶部返回
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .background(Color(0xFF14141A))
+                .then(topInset)
                 .padding(horizontal = 16.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {

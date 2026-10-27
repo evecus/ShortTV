@@ -305,7 +305,7 @@ object DemoData {
             awemeType = 1,
             desc = title,
             video = Video(
-                duration = seconds,
+                duration = seconds * 1000,
                 width = 1280,
                 height = 720,
                 ratio = "720p",

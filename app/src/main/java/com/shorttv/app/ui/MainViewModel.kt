@@ -94,6 +94,46 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val _userPage = MutableStateFlow<UserPage?>(null)
     val userPage: StateFlow<UserPage?> = _userPage.asStateFlow()
 
+    private val _userLoading = MutableStateFlow(false)
+    val userLoading: StateFlow<Boolean> = _userLoading.asStateFlow()
+
+    private val _userError = MutableStateFlow<String?>(null)
+    val userError: StateFlow<String?> = _userError.asStateFlow()
+
+    private var currentUserSecUid = ""
+    private var userJob: Job? = null
+    private var userWorksJob: Job? = null
+    private var userGeneration = 0L
+
+    /**
+     * feed / 搜索 / 播放列表中出现过的作者缓存。
+     *
+     * 作者资料接口（user/profile/other）在有风控的网络环境下可能整体不可用，
+     * 而作者字段随每条视频返回始终可用 —— 用户主页以缓存作者兜底，
+     * 保证头像 / 昵称 / 签名 / 统计有真实数据可展示。
+     */
+    private val authorCache = LinkedHashMap<String, Author>()
+
+    /** 点击作者头像时立即缓存该视频内嵌的作者数据（与任何接口无关，始终可用）。 */
+    fun cacheAuthor(author: Author?) {
+        if (author == null) return
+        if (author.secUid.isNotBlank() && author.nickname.isNotBlank()) {
+            authorCache[author.secUid] = author
+        }
+    }
+
+    private fun cacheAuthors(items: List<Aweme>) {
+        for (item in items) cacheAuthor(item.author)
+        if (authorCache.size > 200) {
+            val iterator = authorCache.entries.iterator()
+            var toDrop = authorCache.size - 200
+            while (toDrop-- > 0 && iterator.hasNext()) {
+                iterator.next()
+                iterator.remove()
+            }
+        }
+    }
+
     private val _mixPage = MutableStateFlow<MixPage?>(null)
     val mixPage: StateFlow<MixPage?> = _mixPage.asStateFlow()
 
@@ -111,11 +151,26 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val _comments = MutableStateFlow<List<Comment>>(emptyList())
     val comments: StateFlow<List<Comment>> = _comments.asStateFlow()
 
+    private val _commentsLoading = MutableStateFlow(false)
+    val commentsLoading: StateFlow<Boolean> = _commentsLoading.asStateFlow()
+
+    private val _commentsHasMore = MutableStateFlow(false)
+    val commentsHasMore: StateFlow<Boolean> = _commentsHasMore.asStateFlow()
+
+    private var currentCommentsAwemeId = ""
+    private var commentsCursor = 0L
+    private var commentsGeneration = 0L
+    private var commentsJob: Job? = null
+    private var danmakuJob: Job? = null
+
     init {
+        // 手机端优先使用移动端 App 推荐流（竖屏内容为主）；TV 保持 Web tab/feed
+        directApi.preferMobileFeed = detectDeviceMode(app) == DeviceMode.MOBILE
         // 数据源随设置实时切换（默认 DIRECT 直连抖音）
         viewModelScope.launch {
             settings.collectLatest { s ->
                 repository.configure(s.dataSource, directApi)
+                directApi.setUserCookie(s.userCookie)
             }
         }
         refreshFeed()
@@ -147,6 +202,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 // 追加时按 aweme_id 去重，避免翻页出现重复卡片。
                 val existing = _feed.value.map { it.awemeId }.toHashSet()
                 val fresh = page.items.filter { it.awemeId.isNotBlank() && it.awemeId !in existing }
+                cacheAuthors(page.items)
                 if (fresh.isNotEmpty() || _feed.value.isEmpty()) {
                     _feed.value = _feed.value + fresh
                 }
@@ -224,6 +280,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 val page = repository.searchPage(baseUrl(), searchKeyword, searchCursor)
                 searchHasMore = page.hasMore
                 searchCursor = page.nextCursor
+                cacheAuthors(page.items)
                 _searchResult.value = _searchResult.value + page.items
             } catch (_: Exception) {
             } finally {
@@ -237,39 +294,142 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun openPlaylist(items: List<Aweme>, startIndex: Int, title: String) {
         _playlist.value = items
         _playlistTitle.value = title
+        cacheAuthors(items)
         // startIndex 通过导航参数传递
     }
 
     // ---------- 用户 / 合集 ----------
 
     fun loadUser(secUid: String) {
-        viewModelScope.launch {
-            val (user, items) = repository.user(baseUrl(), secUid)
-            _userPage.value = UserPage(user = user, items = items, hasMore = false)
+        if (secUid.isBlank()) {
+            _userPage.value = UserPage()
+            _userError.value = "作者标识为空"
+            return
+        }
+        val generation = ++userGeneration
+        userJob?.cancel()
+        userWorksJob?.cancel()
+        currentUserSecUid = secUid
+        _userError.value = null
+        // 立即用视频内嵌的作者数据渲染主页，接口结果随后刷新
+        val cached = authorCache[secUid]
+        _userPage.value = if (cached != null) UserPage(user = cached) else null
+        _userLoading.value = true
+        userJob = viewModelScope.launch {
+            try {
+                val page = repository.user(
+                    baseUrl = baseUrl(),
+                    secUid = secUid,
+                    fallbackAuthor = cached
+                )
+                if (generation != userGeneration || secUid != currentUserSecUid) return@launch
+                // 接口结果与缓存合并：接口拿到的资料/作品优先，缓存保底
+                val merged = if (page.user == null && cached != null) page.copy(user = cached) else page
+                _userPage.value = merged
+                if (merged.user == null && merged.items.isEmpty()) {
+                    _userError.value = "作者资料或作品暂不可用"
+                } else if (merged.items.isEmpty() && !merged.hasMore && (merged.user?.awemeCount ?: 0L) > 0L) {
+                    // 资料已有（feed 缓存兜底）且作者确有作品，但作品接口未返回数据
+                    _userError.value = "作品列表暂不可用（接口受限）"
+                }
+            } catch (e: Exception) {
+                if (generation != userGeneration) return@launch
+                _userPage.value = cached?.let { UserPage(user = it) } ?: UserPage()
+                _userError.value = e.message ?: "作者主页加载失败"
+            } finally {
+                if (generation == userGeneration) _userLoading.value = false
+            }
+        }
+    }
+
+    fun loadMoreUserWorks() {
+        val current = _userPage.value ?: return
+        val secUid = currentUserSecUid
+        val generation = userGeneration
+        if (_userLoading.value || !current.hasMore || secUid.isBlank()) return
+        _userLoading.value = true
+        userWorksJob = viewModelScope.launch {
+            try {
+                val next = repository.userWorks(baseUrl(), secUid, current.cursor)
+                if (generation != userGeneration || secUid != currentUserSecUid) return@launch
+                val latest = _userPage.value ?: return@launch
+                val existing = latest.items.mapTo(HashSet<String>()) { it.awemeId }
+                val fresh = next.items.filter { it.awemeId.isNotBlank() && it.awemeId !in existing }
+                _userPage.value = latest.copy(
+                    user = latest.user ?: next.user,
+                    items = latest.items + fresh,
+                    cursor = next.cursor,
+                    hasMore = next.hasMore && next.cursor != latest.cursor
+                )
+            } catch (e: Exception) {
+                if (generation == userGeneration) {
+                    _userError.value = e.message ?: "更多作品加载失败"
+                }
+            } finally {
+                if (generation == userGeneration) _userLoading.value = false
+            }
         }
     }
 
     fun loadMix(mixId: String) {
         viewModelScope.launch {
-            _mixPage.value = repository.mix(baseUrl(), mixId)
+            val page = repository.mix(baseUrl(), mixId)
+            cacheAuthors(page.items)
+            _mixPage.value = page
         }
     }
 
     // ---------- 弹幕 / 评论 ----------
 
-    fun loadDanmaku(awemeId: String) {
-        viewModelScope.launch {
-            _danmaku.value = repository.danmaku(baseUrl(), awemeId)
+    fun loadDanmaku(awemeId: String, durationMs: Long = 0L) {
+        danmakuJob?.cancel()
+        _danmaku.value = emptyList()
+        if (awemeId.isBlank()) return
+        danmakuJob = viewModelScope.launch {
+            _danmaku.value = repository.danmaku(baseUrl(), awemeId, durationMs)
         }
     }
 
     fun clearDanmaku() {
+        danmakuJob?.cancel()
         _danmaku.value = emptyList()
     }
 
     fun loadComments(awemeId: String) {
-        viewModelScope.launch {
-            _comments.value = repository.comments(baseUrl(), awemeId)
+        commentsGeneration++
+        commentsJob?.cancel()
+        currentCommentsAwemeId = awemeId
+        commentsCursor = 0L
+        _comments.value = emptyList()
+        _commentsLoading.value = false
+        _commentsHasMore.value = awemeId.isNotBlank()
+        loadMoreComments()
+    }
+
+    fun loadMoreComments() {
+        if (_commentsLoading.value || !_commentsHasMore.value || currentCommentsAwemeId.isBlank()) return
+        val awemeId = currentCommentsAwemeId
+        val cursor = commentsCursor
+        val generation = commentsGeneration
+        _commentsLoading.value = true
+        commentsJob = viewModelScope.launch {
+            try {
+                val page = repository.comments(
+                    baseUrl = baseUrl(),
+                    awemeId = awemeId,
+                    cursor = cursor
+                )
+                if (generation != commentsGeneration || awemeId != currentCommentsAwemeId) return@launch
+                val existing = _comments.value.mapTo(HashSet<String>()) { it.commentId }
+                val fresh = page.items.filter { it.commentId.isNotBlank() && it.commentId !in existing }
+                _comments.value = _comments.value + fresh
+                commentsCursor = page.cursor
+                _commentsHasMore.value = page.hasMore && page.cursor != cursor
+            } catch (_: Exception) {
+                if (generation == commentsGeneration) _commentsHasMore.value = false
+            } finally {
+                if (generation == commentsGeneration) _commentsLoading.value = false
+            }
         }
     }
 
@@ -286,6 +446,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 refreshFeed(); refreshLive(); refreshHotWords()
             }
         }
+    }
+
+    /** 保存用户自己的抖音登录 Cookie（可选，用于搜索 / 作者统计与作品 / 评论分页） */
+    fun setUserCookie(value: String) {
+        viewModelScope.launch { settingsRepository.setUserCookie(value) }
     }
 
     /** 切换数据源（直连 / 服务端 / 演示），切换后全量刷新 */

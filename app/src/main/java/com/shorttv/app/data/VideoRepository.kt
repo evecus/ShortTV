@@ -5,6 +5,7 @@ import com.shorttv.app.data.demo.DemoData
 import com.shorttv.app.data.model.Author
 import com.shorttv.app.data.model.Aweme
 import com.shorttv.app.data.model.Comment
+import com.shorttv.app.data.model.CommentPage
 import com.shorttv.app.data.model.DanmakuItem
 import com.shorttv.app.data.model.HotWord
 import com.shorttv.app.data.model.LiveRoom
@@ -94,8 +95,8 @@ class VideoRepository {
                     if (page.items.isNotEmpty()) return page.let { AwemePage(it.items, it.hasMore, it.nextCursor) }
                 }.onFailure { Log.w(TAG, "direct feed failed: ${it.message}") }
             }
-            Log.w(TAG, "direct feed unavailable, fallback to demo")
-            return demoFeed(cursor)
+            Log.w(TAG, "direct feed unavailable")
+            return AwemePage(emptyList(), false, cursor)
         }
         if (dataSource == DataSource.DEMO) return demoFeed(cursor)
         val api = apiClientFor(baseUrl)
@@ -233,29 +234,55 @@ class VideoRepository {
 
     // ---------- 用户 ----------
 
-    suspend fun user(baseUrl: String, secUid: String): Pair<Author?, List<Aweme>> {
+    /**
+     * 用户公开资料与首屏作品。
+     *
+     * 实测（2026-10）：`user/profile/other` 与 `aweme/post` 对部分客户端/网络
+     * 环境有风控限制，可能整体不可用。因此允许调用方传入「feed 内嵌作者」
+     * 作为资料兜底（作者字段随每条视频返回，始终可用），作品列表失败时
+     * 返回空并展示可重试的空态。
+     */
+    suspend fun user(
+        baseUrl: String,
+        secUid: String,
+        fallbackAuthor: Author? = null
+    ): UserPage {
+        if (secUid.isBlank()) return UserPage()
         if (dataSource == DataSource.DIRECT) {
-            val api = directApi
-            if (api != null) {
-                runCatching {
-                    val page = api.userWorks(secUid)
-                    if (page.items.isNotEmpty()) {
-                        return (page.items.first().author.takeIf { it.secUid.isNotBlank() }) to page.items
-                    }
-                }.onFailure { Log.w(TAG, "direct userWorks failed: ${it.message}") }
-            }
-        } else if (dataSource == DataSource.SERVER) {
-            val api = apiClientFor(baseUrl)
-            if (api != null) {
-                runCatching {
-                    val page = api.userWorks(secUid)
-                    if (page.user != null || page.items.isNotEmpty()) return page.user to page.items
-                }
-            }
+            val api = directApi ?: return UserPage(user = fallbackAuthor)
+            val profile = runCatching { api.userProfile(secUid) }
+                .onFailure { Log.w(TAG, "direct userProfile failed: ${it.message}") }
+                .getOrNull()
+            val works = runCatching { api.userWorks(secUid) }
+                .onFailure { Log.w(TAG, "direct userWorks failed: ${it.message}") }
+                .getOrNull()
+            return UserPage(
+                user = profile
+                    ?: works?.items?.firstOrNull()?.author?.takeIf { it.secUid.isNotBlank() }
+                    ?: fallbackAuthor?.takeIf { it.secUid == secUid || it.secUid.isBlank() },
+                items = works?.items.orEmpty(),
+                cursor = works?.nextCursor ?: 0L,
+                hasMore = works?.hasMore == true
+            )
+        }
+        if (dataSource == DataSource.SERVER) {
+            val api = apiClientFor(baseUrl) ?: return UserPage(user = fallbackAuthor)
+            val profile = runCatching { api.user(secUid).user }.getOrNull()
+            val works = runCatching { api.userWorks(secUid) }.getOrNull()
+            return UserPage(
+                user = profile ?: works?.user ?: fallbackAuthor,
+                items = works?.items.orEmpty(),
+                cursor = works?.cursor ?: 0L,
+                hasMore = works?.hasMore == true
+            )
         }
         val items = DemoData.feed.filter { it.author.secUid == secUid }
-        val author = items.firstOrNull()?.author
-        return author to items
+        return UserPage(
+            user = items.firstOrNull()?.author ?: fallbackAuthor,
+            items = items,
+            cursor = items.size.toLong(),
+            hasMore = false
+        )
     }
 
     // ---------- 合集 ----------
@@ -303,52 +330,58 @@ class VideoRepository {
 
     // ---------- 评论 / 弹幕 ----------
 
-    suspend fun comments(baseUrl: String, awemeId: String): List<Comment> {
+    suspend fun comments(
+        baseUrl: String,
+        awemeId: String,
+        cursor: Long = 0L,
+        count: Int = 20
+    ): CommentPage {
         if (dataSource == DataSource.DIRECT) {
-            val api = directApi
-            if (api != null) {
-                runCatching { api.comments(awemeId) }.getOrNull()?.let { if (it.isNotEmpty()) return it }
-            }
-        } else if (dataSource == DataSource.SERVER) {
-            val api = apiClientFor(baseUrl)
-            if (api != null) {
-                runCatching {
-                    val list = api.comments(awemeId).items
-                    if (list.isNotEmpty()) return list
-                }
-            }
+            val api = directApi ?: return CommentPage(cursor = cursor)
+            return runCatching { api.comments(awemeId, cursor, count) }
+                .onFailure { Log.w(TAG, "direct comments failed: ${it.message}") }
+                .getOrDefault(CommentPage(cursor = cursor))
         }
-        return DemoData.feed.indices.take(12).map { i ->
+        if (dataSource == DataSource.SERVER) {
+            val api = apiClientFor(baseUrl) ?: return CommentPage(cursor = cursor)
+            return runCatching { api.comments(awemeId, cursor, count) }
+                .getOrDefault(CommentPage(cursor = cursor))
+        }
+        val all = DemoData.feed.indices.take(12).map { i ->
             Comment(
                 commentId = "demo_comment_$i",
                 content = DemoData.danmakuPool[i % DemoData.danmakuPool.size] + "！这条视频太赞了，已三连～",
                 userNickname = "演示用户${('A' + i)}",
-                createTime = 1_700_000_000L + i * 3_600_000L,
+                createTime = 1_700_000_000L + i * 3_600L,
                 diggCount = (20 - i).toLong() * 7
             )
         }
+        val start = cursor.toInt().coerceAtMost(all.size)
+        val end = (start + count).coerceAtMost(all.size)
+        return CommentPage(
+            items = all.subList(start, end),
+            cursor = end.toLong(),
+            hasMore = end < all.size
+        )
     }
 
-    suspend fun danmaku(baseUrl: String, awemeId: String): List<DanmakuItem> {
+    suspend fun danmaku(baseUrl: String, awemeId: String, durationMs: Long = 0L): List<DanmakuItem> {
         if (dataSource == DataSource.DIRECT) {
-            val api = directApi
-            if (api != null) {
-                runCatching { api.danmaku(awemeId) }.getOrNull()?.let { if (it.isNotEmpty()) return it }
-            }
-        } else if (dataSource == DataSource.SERVER) {
-            val api = apiClientFor(baseUrl)
-            if (api != null) {
-                runCatching {
-                    val list = api.danmaku(awemeId)
-                    if (list.isNotEmpty()) return list
-                }
-            }
+            val api = directApi ?: return emptyList()
+            return runCatching { api.danmaku(awemeId, durationMs) }
+                .onFailure { Log.w(TAG, "direct danmaku failed: ${it.message}") }
+                .getOrDefault(emptyList())
+        }
+        if (dataSource == DataSource.SERVER) {
+            val api = apiClientFor(baseUrl) ?: return emptyList()
+            return runCatching { api.danmaku(awemeId) }.getOrDefault(emptyList())
         }
         return DemoData.danmakuPool.mapIndexed { i, text ->
             DanmakuItem(
                 id = "demo_dm_$i",
                 content = text,
-                userNickname = "演示用户${i % 20}"
+                userNickname = "演示用户${i % 20}",
+                offsetTimeMs = i * 1_500L
             )
         }
     }
@@ -365,33 +398,33 @@ class VideoRepository {
         )
     }
 
-    /** 用户作品分页 */
+    /** 用户作品分页。DIRECT/SERVER 返回真实空列表，不降级为演示作品。 */
     suspend fun userWorks(baseUrl: String, secUid: String, cursor: Long): UserPage {
         if (dataSource == DataSource.DIRECT) {
-            val api = directApi
-            if (api != null) {
-                runCatching {
-                    val page = api.userWorks(secUid, cursor)
-                    if (page.items.isNotEmpty()) {
-                        return UserPage(
-                            user = page.items.first().author.takeIf { it.secUid.isNotBlank() },
-                            items = page.items,
-                            cursor = page.nextCursor,
-                            hasMore = page.hasMore
-                        )
-                    }
-                }.onFailure { Log.w(TAG, "direct userWorks page failed: ${it.message}") }
-            }
-        } else if (dataSource == DataSource.SERVER) {
-            val api = apiClientFor(baseUrl)
-            if (api != null) {
-                runCatching {
-                    val page = api.userWorks(secUid, cursor)
-                    if (page.items.isNotEmpty()) return page
-                }
-            }
+            val api = directApi ?: return UserPage(cursor = cursor)
+            return runCatching {
+                val page = api.userWorks(secUid, cursor)
+                UserPage(
+                    user = page.items.firstOrNull()?.author?.takeIf { it.secUid.isNotBlank() },
+                    items = page.items,
+                    cursor = page.nextCursor,
+                    hasMore = page.hasMore
+                )
+            }.onFailure { Log.w(TAG, "direct userWorks page failed: ${it.message}") }
+                .getOrDefault(UserPage(cursor = cursor))
+        }
+        if (dataSource == DataSource.SERVER) {
+            val api = apiClientFor(baseUrl) ?: return UserPage(cursor = cursor)
+            return runCatching { api.userWorks(secUid, cursor) }
+                .getOrDefault(UserPage(cursor = cursor))
         }
         val items = DemoData.feed.filter { it.author.secUid == secUid }
-        return UserPage(items = items, hasMore = false)
+        if (cursor > 0) return UserPage(cursor = cursor, hasMore = false)
+        return UserPage(
+            user = items.firstOrNull()?.author,
+            items = items,
+            cursor = items.size.toLong(),
+            hasMore = false
+        )
     }
 }

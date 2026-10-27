@@ -5,10 +5,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.pager.VerticalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.shorttv.app.ui.MainViewModel
@@ -33,6 +31,8 @@ fun PlaylistScreen(
     val settings by vm.settings.collectAsStateWithLifecycle()
     val danmakuAll by vm.danmaku.collectAsStateWithLifecycle()
     val comments by vm.comments.collectAsStateWithLifecycle()
+    val commentsLoading by vm.commentsLoading.collectAsStateWithLifecycle()
+    val commentsHasMore by vm.commentsHasMore.collectAsStateWithLifecycle()
 
     if (playlist.isEmpty()) {
         EmptyHint(text = "播放列表为空", modifier = modifier)
@@ -44,12 +44,6 @@ fun PlaylistScreen(
     ) { playlist.size }
     val scope = rememberCoroutineScope()
 
-    // 当前页激活时请求弹幕
-    val currentAwemeId = playlist.getOrNull(pagerState.settledPage)?.awemeId
-    LaunchedEffect(currentAwemeId) {
-        currentAwemeId?.let { vm.loadDanmaku(it) }
-    }
-
     Box(modifier = modifier.fillMaxSize()) {
         VerticalPager(
             state = pagerState,
@@ -57,23 +51,26 @@ fun PlaylistScreen(
         ) { page ->
             val aweme = playlist[page]
             val active = page == pagerState.settledPage
-            val danmakuSource = rememberDripDanmaku(
-                all = if (active) danmakuAll else emptyList(),
-                active = active
-            )
             FeedPlayerPage(
                 aweme = aweme,
                 isActive = active,
                 settings = settings,
                 history = vm.history,
-                danmakuSource = danmakuSource,
+                danmakuSource = if (active) danmakuAll else emptyList(),
                 comments = if (active) comments else emptyList(),
-                onRequestDanmaku = { vm.loadDanmaku(aweme.awemeId) },
+                commentsLoading = active && commentsLoading,
+                commentsHasMore = active && commentsHasMore,
+                onRequestDanmaku = { vm.loadDanmaku(aweme.awemeId, aweme.video.duration.toLong()) },
                 onToggleDanmaku = { vm.setDanmakuEnabled(!settings.danmakuEnabled) },
                 onOpenComments = { vm.loadComments(aweme.awemeId) },
+                onLoadMoreComments = { vm.loadMoreComments() },
                 showBackButton = true,
                 onBack = onBack,
-                onAuthorClick = { onOpenUser(aweme.author.secUid) },
+                onAuthorClick = {
+                    // 点击瞬间缓存视频内嵌的作者数据，作者主页不依赖额外接口
+                    vm.cacheAuthor(aweme.author)
+                    onOpenUser(aweme.author.secUid)
+                },
                 onEnded = {
                     if (settings.autoPlayNext && page < playlist.lastIndex) {
                         scope.launch { pagerState.animateScrollToPage(page + 1) }

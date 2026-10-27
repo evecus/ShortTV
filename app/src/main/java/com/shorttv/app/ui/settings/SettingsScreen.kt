@@ -239,6 +239,63 @@ fun SettingsScreen(
 
         Spacer(Modifier.height(24.dp))
 
+        // ---------- 登录 Cookie（可选） ----------
+        SectionTitle("登录 Cookie（可选）")
+        Text(
+            text = "抖音的搜索、作者统计与作品列表、评论分页接口需要登录态。" +
+                "在手机浏览器登录 douyin.com 后，复制完整 Cookie 粘贴到这里即可解锁；" +
+                "仅使用你自己的账号会话，留空不影响推荐流 / 弹幕 / 热门评论。",
+            color = Color(0xFFA9A9B8),
+            style = MaterialTheme.typography.bodyMedium
+        )
+        Spacer(Modifier.height(10.dp))
+        var cookieInput by remember(settings.userCookie) { mutableStateOf(settings.userCookie) }
+        var cookieSaved by remember { mutableStateOf(false) }
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(10.dp))
+                .background(Color(0xFF1B1B22))
+                .padding(horizontal = 14.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            BasicTextField(
+                value = cookieInput,
+                onValueChange = {
+                    cookieInput = it
+                    cookieSaved = false
+                },
+                singleLine = true,
+                textStyle = MaterialTheme.typography.bodyLarge.copy(color = Color(0xFFF2F2F5)),
+                cursorBrush = SolidColor(Color(0xFFE5394F)),
+                keyboardActions = androidx.compose.foundation.text.KeyboardActions(
+                    onDone = { keyboard?.hide() }
+                ),
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(vertical = 14.dp)
+            )
+            Spacer(Modifier.width(10.dp))
+            ActionChip(
+                text = "保存",
+                primary = true,
+                onClick = {
+                    vm.setUserCookie(cookieInput)
+                    cookieSaved = true
+                }
+            )
+        }
+        if (cookieSaved) {
+            Spacer(Modifier.height(6.dp))
+            Text(
+                text = "已保存，重新进入作者页 / 搜索页生效",
+                color = Color(0xFF4DDFA0),
+                style = MaterialTheme.typography.labelSmall
+            )
+        }
+
+        Spacer(Modifier.height(24.dp))
+
         // ---------- 播放 ----------
         SectionTitle("播放")
         SwitchRow(

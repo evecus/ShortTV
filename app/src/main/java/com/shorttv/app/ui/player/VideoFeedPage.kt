@@ -12,14 +12,18 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -28,6 +32,7 @@ import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.ChatBubbleOutline
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
+import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Star
@@ -102,9 +107,12 @@ fun FeedPlayerPage(
     history: HistoryRepository,
     danmakuSource: List<DanmakuItem>,
     comments: List<com.shorttv.app.data.model.Comment>,
+    commentsLoading: Boolean,
+    commentsHasMore: Boolean,
     onRequestDanmaku: () -> Unit,
     onToggleDanmaku: () -> Unit,
     onOpenComments: () -> Unit,
+    onLoadMoreComments: () -> Unit,
     showBackButton: Boolean = false,
     onBack: (() -> Unit)? = null,
     onAuthorClick: () -> Unit,
@@ -117,9 +125,21 @@ fun FeedPlayerPage(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    val activityRef = context as? com.shorttv.app.MainActivity
 
     // ---------- 播放器 ----------
     val playUrl = remember(aweme.awemeId) { aweme.video.resolvePlayUrl() }
+    // 横屏视频：手机端完整显示（FIT，上下留黑边，类抖音），并提供「全屏观看」
+    val isLandscapeVideo = aweme.video.width > 0 && aweme.video.height > 0 &&
+        aweme.video.width > aweme.video.height
+    var landscapeFullscreen by remember(aweme.awemeId) { mutableStateOf(false) }
+    // 显示策略：
+    // - TV 横屏：一律完整显示（竖屏视频左右留黑边，横屏视频恰好铺满）
+    // - 手机竖屏：竖屏视频铺满（ZOOM，无黑边）；横屏视频/全屏观看时完整显示
+    val fitMode = when (LocalDeviceMode.current) {
+        DeviceMode.TV -> true
+        DeviceMode.MOBILE -> isLandscapeVideo || landscapeFullscreen
+    }
     val player = remember(aweme.awemeId) {
         // 抖音 play/ 中转地址对 Referer/Cookie 敏感（无 Referer 直接 403），
         // 必须为 ExoPlayer 的数据源注入 UA + Referer（对齐 Web 端请求头）。
@@ -137,11 +157,23 @@ fun FeedPlayerPage(
             .build().apply {
                 if (playUrl != null) {
                     setMediaItem(MediaItem.fromUri(playUrl))
-                    repeatMode = Player.REPEAT_MODE_ONE
+                    repeatMode = if (settings.autoPlayNext) {
+                        Player.REPEAT_MODE_OFF
+                    } else {
+                        Player.REPEAT_MODE_ONE
+                    }
                     playWhenReady = true
                     prepare()
                 }
             }
+    }
+    // 自动连播：设置切换时同步循环模式（开启=播完切换下一条，关闭=单条循环）
+    LaunchedEffect(settings.autoPlayNext) {
+        player.repeatMode = if (settings.autoPlayNext) {
+            Player.REPEAT_MODE_OFF
+        } else {
+            Player.REPEAT_MODE_ONE
+        }
     }
     DisposableEffect(aweme.awemeId) {
         onDispose { player.release() }
@@ -204,10 +236,25 @@ fun FeedPlayerPage(
     var toast by remember { mutableStateOf<String?>(null) }
 
     // 沉浸模式（TV 端）：控制栏/评论面板都不在时 = 完全全屏，
-    // 底部信息与右侧互动栏隐藏，仅保留弹幕。手机端信息栏常驻。
+    // 底部信息与右侧互动栏隐藏，仅保留弹幕。手机端信息栏常驻；
+    // 手机「全屏观看」横屏时同样沉浸，仅保留画面与控制栏。
     val deviceMode = LocalDeviceMode.current
-    val chromeVisible = deviceMode == DeviceMode.MOBILE ||
+    val chromeVisible = (deviceMode == DeviceMode.MOBILE && !landscapeFullscreen) ||
         controlsVisible || showComments || !isActive
+
+    // 「全屏观看」：手机横屏播放，返回键 / 切换视频时恢复竖屏
+    androidx.activity.compose.BackHandler(enabled = landscapeFullscreen) {
+        landscapeFullscreen = false
+        activityRef?.requestedOrientation =
+            android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+    }
+    LaunchedEffect(isActive, aweme.awemeId) {
+        if (!isActive && landscapeFullscreen) {
+            landscapeFullscreen = false
+            activityRef?.requestedOrientation =
+                android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+        }
+    }
 
     // 双击爱心动画
     val heartAnim = remember { Animatable(0f) }
@@ -320,7 +367,14 @@ fun FeedPlayerPage(
                         setKeepContentOnPlayerReset(true)
                     }
                 },
-                update = { view -> view.player = player },
+                update = { view ->
+                    view.player = player
+                    view.resizeMode = if (fitMode) {
+                        AspectRatioFrameLayout.RESIZE_MODE_FIT
+                    } else {
+                        AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                    }
+                },
                 modifier = Modifier.fillMaxSize()
             )
         }
@@ -345,6 +399,8 @@ fun FeedPlayerPage(
         // 弹幕
         DanmakuOverlay(
             source = danmakuSource,
+            playbackPositionMs = positionMs,
+            isPlaying = isPlaying,
             enabled = settings.danmakuEnabled,
             fontSizeSp = settings.danmakuSize,
             alpha = settings.danmakuAlpha,
@@ -376,6 +432,54 @@ fun FeedPlayerPage(
                         alpha = heartAnim.value
                     }
             )
+        }
+
+        // 「全屏观看」入口：手机端横屏视频在画面正下方提示（对齐抖音）
+        if (deviceMode == DeviceMode.MOBILE && isLandscapeVideo && !landscapeFullscreen) {
+            BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+                val density = androidx.compose.ui.platform.LocalDensity.current
+                val screenW = constraints.maxWidth.toFloat()
+                val screenH = constraints.maxHeight.toFloat()
+                val videoAspect = aweme.video.width.toFloat() / aweme.video.height.toFloat()
+                val screenAspect = if (screenH > 0f) screenW / screenH else 9f / 16f
+                // FIT 模式下视频实际显示高度，入口贴在视频下缘
+                val shownHeight = if (videoAspect < screenAspect) screenW / videoAspect else screenH
+                val chipY = with(density) {
+                    ((screenH - shownHeight) / 2f + shownHeight).toDp() + 10.dp
+                }
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .offset(y = chipY),
+                    horizontalArrangement = Arrangement.Center
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .tvClickable(onClick = {
+                                landscapeFullscreen = true
+                                activityRef?.requestedOrientation =
+                                    android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                            })
+                            .clip(RoundedCornerShape(20.dp))
+                            .background(Color(0x66000000))
+                            .padding(horizontal = 14.dp, vertical = 7.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Fullscreen,
+                            contentDescription = null,
+                            tint = Color.White,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            text = "全屏观看",
+                            color = Color.White,
+                            style = MaterialTheme.typography.labelMedium
+                        )
+                    }
+                }
+            }
         }
 
         // 底部信息（作者 + 标题 + 合集入口）——TV 沉浸播放时隐藏
@@ -510,11 +614,15 @@ fun FeedPlayerPage(
             }
         }
 
-        // 返回按钮（播放列表场景）
+        // 返回按钮（播放列表场景；手机端避开系统状态栏）
         if (showBackButton && onBack != null) {
             Box(
                 modifier = Modifier
                     .align(Alignment.TopStart)
+                    .then(
+                        if (deviceMode == DeviceMode.MOBILE) Modifier.statusBarsPadding()
+                        else Modifier
+                    )
                     .padding(16.dp)
                     .tvClickable(onClick = onBack)
                     .clip(CircleShape)
@@ -538,7 +646,14 @@ fun FeedPlayerPage(
         ) {
             CommentsPanel(
                 comments = comments,
-                onClose = { showComments = false }
+                loading = commentsLoading,
+                hasMore = commentsHasMore,
+                onLoadMore = onLoadMoreComments,
+                onClose = { showComments = false },
+                // 播放列表为独立全屏路由（无底部导航），评论面板需避开手势条
+                modifier = if (showBackButton && deviceMode == DeviceMode.MOBILE) {
+                    Modifier.navigationBarsPadding()
+                } else Modifier
             )
         }
 
