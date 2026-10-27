@@ -444,6 +444,86 @@ class DouyinDirectApi(
     }
 
     /**
+     * 用户中心签名链（对齐 myDV nu0.F0/i）：
+     * 查询串附加 a_bogus + uifid + timestamp，并携带请求头
+     * x-secsdk-web-signature = md5("<uifid>_<ts>_A96D855A08C0A9707F8BEF0D9A527E4E_<查询串>")。
+     * 作者作品等用户中心接口必须有该头，缺失时 Argus 报 Signature Not Found。
+     * uifid 来自抖音下发的 UIFID Cookie（真实身份），缺失时无法构造签名。
+     */
+    private suspend fun signedUserCenterGet(
+        path: String,
+        params: Map<String, String>,
+        referer: String,
+    ): String? {
+        val all = LinkedHashMap(params).apply {
+            put("msToken", identity.bestMsToken())
+        }
+        val baseQuery = buildQuery(all)
+        val aBogus = signer.signABogus(baseQuery, identity.userAgent)
+        if (!aBogus.isNullOrBlank()) all["a_bogus"] = aBogus
+        val uifid = identity.uifid
+        if (uifid.isBlank()) {
+            Log.w(TAG, "userCenter chain skipped: UIFID cookie missing")
+            return null
+        }
+        all["uifid"] = uifid
+        val timestamp = (System.currentTimeMillis() / 1000).toString()
+        all["timestamp"] = timestamp
+
+        val finalQuery = buildQuery(all)
+        val payload = buildString {
+            append(uifid)
+            append('_')
+            append(timestamp)
+            append("_A96D855A08C0A9707F8BEF0D9A527E4E_")
+            // 对齐 myDV nu0.i：以原始 k=v&k=v 形式拼接全量参数
+            append(all.entries.joinToString("&") { "${it.key}=${it.value}" })
+        }
+        val webSignature = md5Hex(payload)
+
+        val url = "$WEB_BASE$path?$finalQuery"
+        val request = Request.Builder()
+            .url(url)
+            .header("User-Agent", identity.userAgent)
+            .header("Accept", "application/json, text/plain, */*")
+            .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+            .header("Cache-Control", "no-cache")
+            .header("Pragma", "no-cache")
+            .header("Priority", "u=1, i")
+            .header("Referer", referer)
+            .header("sec-ch-ua", "\"Not/A)Brand\";v=\"8\", \"Chromium\";v=\"147\", \"Google Chrome\";v=\"147\"")
+            .header("sec-ch-ua-mobile", "?0")
+            .header("sec-ch-ua-platform", "\"Windows\"")
+            .header("Sec-Fetch-Dest", "empty")
+            .header("Sec-Fetch-Mode", "cors")
+            .header("Sec-Fetch-Site", "same-origin")
+            .header("Cookie", identity.cookieHeader())
+            .header("x-secsdk-web-signature", webSignature)
+            .get()
+            .build()
+        return withContext(Dispatchers.IO) {
+            try {
+                http.newCall(request).execute().use { resp ->
+                    val body = resp.body?.string().orEmpty()
+                    if (!resp.isSuccessful) {
+                        Log.w(TAG, "$path HTTP ${resp.code}: ${body.take(200)}")
+                        return@use null
+                    }
+                    body
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "$path failed: ${e.message}")
+                null
+            }
+        }
+    }
+
+    private fun md5Hex(input: String): String =
+        java.security.MessageDigest.getInstance("MD5")
+            .digest(input.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
+
+    /**
      * 执行一次带 a_bogus 签名的 Web 请求。
      * 流程：构造 query → getABogus 签名 → 拼 a_bogus → 带 Cookie/UA/Referer 请求。
      *
@@ -456,7 +536,8 @@ class DouyinDirectApi(
         referer: String = "$WEB_BASE/",
     ): String? {
         val all = LinkedHashMap(params).apply {
-            put("msToken", identity.msToken ?: identity.ensureMsToken())
+            // 用户 Cookie 内若带有浏览器真实签发的 msToken，优先使用
+            put("msToken", identity.bestMsToken())
         }
         val query = buildQuery(all)
         val aBogus = signer.signABogus(query, identity.userAgent)
@@ -468,8 +549,14 @@ class DouyinDirectApi(
             .header("User-Agent", identity.userAgent)
             .header("Accept", "application/json, text/plain, */*")
             .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+            .header("Cache-Control", "no-cache")
+            .header("Pragma", "no-cache")
+            .header("Priority", "u=1, i")
             .header("Referer", referer)
-            .header("Origin", WEB_BASE)
+            // 浏览器同源 GET XHR 不发送 Origin，缺失该头是 Argus 的指纹特征之一
+            .header("sec-ch-ua", "\"Not/A)Brand\";v=\"8\", \"Chromium\";v=\"147\", \"Google Chrome\";v=\"147\"")
+            .header("sec-ch-ua-mobile", "?0")
+            .header("sec-ch-ua-platform", "\"Windows\"")
             .header("Sec-Fetch-Dest", "empty")
             .header("Sec-Fetch-Mode", "cors")
             .header("Sec-Fetch-Site", "same-origin")
@@ -734,7 +821,7 @@ class DouyinDirectApi(
         return resp.user?.toAuthor()
     }
 
-    /** 用户公开作品。 */
+    /** 用户公开作品（Web 签名接口，被拦时回退 App 会话接口）。 */
     suspend fun userWorks(secUid: String, cursor: Long = 0, count: Int = 20): DirectPage {
         if (secUid.isBlank()) return DirectPage(emptyList(), false, cursor)
         identity.ensureAll()
@@ -742,21 +829,97 @@ class DouyinDirectApi(
             put("sec_user_id", secUid)
             put("count", count.toString())
             put("max_cursor", cursor.toString())
-            put("cut_version", "1")
+            put("locate_item_id", "")
             put("locate_query", "false")
+            put("show_live_replay_strategy", "1")
+            // 对齐 myDV：首页 need_time_list=1，翻页为 0
+            put("need_time_list", if (cursor == 0L) "1" else "0")
+            put("time_list_query", "0")
+            put("whale_cut_token", "")
+            put("cut_version", "1")
             put("publish_video_strategy_type", "2")
             put("from_user_page", "1")
-            put("need_time_list", "0")
-            put("show_live_replay_strategy", "1")
             put("version_code", "290100")
             put("version_name", "29.1.0")
         }
-        val body = signedWebGet(
+        val body = signedUserCenterGet(
             path = "/aweme/v1/web/aweme/post/",
             params = params,
             referer = "$WEB_BASE/user/$secUid"
-        ) ?: return DirectPage(emptyList(), false, cursor)
-        val resp = json.decodeFromString<FeedResp>(body)
+        )
+        if (!body.isNullOrBlank()) {
+            val resp = runCatching { json.decodeFromString<FeedResp>(body) }.getOrNull()
+            if (resp != null) {
+                val items = parseAwemes(resp.awemeList.ifEmpty { resp.data })
+                if (items.isNotEmpty()) {
+                    val next = if (resp.maxCursor > 0) resp.maxCursor else resp.cursor
+                    return DirectPage(items, resp.hasMore == 1, next)
+                }
+            }
+        }
+        // Web 签名接口被 Argus 拦截：回退 App 会话接口（Cookie 里的 sessionid）
+        val app = runCatching { userWorksApp(secUid, cursor, count) }
+            .onFailure { Log.w(TAG, "app userWorks failed: ${it.message}") }
+            .getOrNull()
+        if (app != null && app.items.isNotEmpty()) return app
+        return DirectPage(emptyList(), false, cursor)
+    }
+
+    /**
+     * App 会话作品接口（/aweme/v1/aweme/post/）。
+     * 使用用户 Cookie 中的 sessionid_ss / sessionid 鉴权，不依赖 Web 签名；
+     * 未配置登录 Cookie 时直接返回 null。
+     */
+    private suspend fun userWorksApp(secUid: String, cursor: Long, count: Int): DirectPage? {
+        val session = identity.cookieValue("sessionid_ss")
+            ?: identity.cookieValue("sessionid")
+            ?: return null
+        val params = linkedMapOf(
+            "sec_user_id" to secUid,
+            "count" to count.toString(),
+            "max_cursor" to cursor.toString(),
+            "aid" to "1128",
+            "app_name" to "aweme",
+            "version_code" to "170400",
+            "device_platform" to "android",
+            "device_type" to "Pixel 7",
+            "device_brand" to "Google",
+            "os_api" to "33",
+            "os_version" to "13",
+            "device_id" to identity.appDeviceId,
+            "iid" to identity.appIid,
+            "openudid" to identity.appOpenudid,
+            "channel" to "googleplay",
+            "resolution" to "1080*2400",
+            "dpi" to "420",
+            "language" to "zh",
+            "ac" to "wifi",
+            "network_type" to "wifi",
+            "os" to "android",
+            "ts" to (System.currentTimeMillis() / 1000).toString(),
+            "_rticket" to System.currentTimeMillis().toString()
+        )
+        val url = "$APP_BASE/aweme/v1/aweme/post/?${buildQuery(params)}"
+        val body = withContext(Dispatchers.IO) {
+            runCatching {
+                http.newCall(
+                    Request.Builder()
+                        .url(url)
+                        .header("User-Agent", APP_UA)
+                        .header("Accept", "application/json")
+                        .header("Cookie", "sessionid_ss=$session; sessionid=$session")
+                        .get()
+                        .build()
+                ).execute().use { resp ->
+                    if (!resp.isSuccessful) null else resp.body?.string().orEmpty()
+                }
+            }.onFailure { Log.w(TAG, "app post request failed: ${it.message}") }
+                .getOrNull().orEmpty()
+        }
+        if (body.isBlank()) return null
+        val resp = runCatching { json.decodeFromString<FeedResp>(body) }
+            .onFailure { Log.w(TAG, "app post decode failed: ${it.message}") }
+            .getOrNull() ?: return null
         val items = parseAwemes(resp.awemeList.ifEmpty { resp.data })
         val next = if (resp.maxCursor > 0) resp.maxCursor else resp.cursor
         return DirectPage(items, resp.hasMore == 1, next)

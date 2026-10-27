@@ -2,7 +2,12 @@ package com.shorttv.app.direct
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
+import android.webkit.CookieManager
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -12,6 +17,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.security.MessageDigest
 import java.util.UUID
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
 /**
@@ -22,7 +28,7 @@ import java.util.concurrent.TimeUnit
  * - msToken：GET https://mssdk.bytedance.com/web/r/token 获取（失败则本地生成）
  * - webid / uifid：本地随机生成并持久化
  */
-class DouyinIdentity private constructor(context: Context) {
+class DouyinIdentity private constructor(private val appContext: Context) {
 
     companion object {
         private const val TAG = "DouyinIdentity"
@@ -63,10 +69,18 @@ class DouyinIdentity private constructor(context: Context) {
     }
 
     private val prefs: SharedPreferences =
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        appContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
     /** mssdk msToken 探测是否已失败（官方端点已下线，失败后不再重试）。 */
     private var msTokenProbeFailed = false
+
+    /** WebView 采集的抖音真实 Cookie（对齐 myDV 的 WebView 初始化链路）。 */
+    @Volatile
+    private var harvestAttempted = false
+
+    @Volatile
+    private var harvestedCookie: String =
+        prefs.getString("harvested_cookie", "").orEmpty()
 
     private val http = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
@@ -95,17 +109,20 @@ class DouyinIdentity private constructor(context: Context) {
             prefs.edit().putString("webid", it).apply()
         }
 
-    /** verifyFp / s_v_web_id。 */
+    /** 优先使用 WebView 采集的真实指纹（s_v_web_id = verify_ 前缀格式）。 */
     val verifyFp: String
-        get() = prefs.getString("verifyFp", null) ?: randomHex(32).also {
-            prefs.edit().putString("verifyFp", it).apply()
-        }
+        get() = harvestedValue("s_v_web_id")?.removePrefix("verify_")
+            ?.takeIf { it.length >= 16 }
+            ?: (prefs.getString("verifyFp", null) ?: randomHex(32).also {
+                prefs.edit().putString("verifyFp", it).apply()
+            })
 
-    /** UIFID（大写十六进制，较长）。 */
+    /** 优先使用 WebView 采集的真实 UIFID。 */
     val uifid: String
-        get() = prefs.getString("uifid", null) ?: randomHex(32).uppercase().also {
-            prefs.edit().putString("uifid", it).apply()
-        }
+        get() = harvestedValue("UIFID")?.takeIf { it.length >= 16 }
+            ?: (prefs.getString("uifid", null) ?: randomHex(32).uppercase().also {
+                prefs.edit().putString("uifid", it).apply()
+            })
 
     /** user_unique_id：直播接口使用。 */
     val userUniqueId: String
@@ -137,14 +154,43 @@ class DouyinIdentity private constructor(context: Context) {
     @Volatile
     var userCookie: String = ""
 
-    /** 拼接 Cookie 头。 */
+    /** 拼接 Cookie 头。优先级：用户 Cookie > WebView 采集的真实 Cookie > 最小匿名 Cookie。 */
     fun cookieHeader(): String {
         if (userCookie.isNotBlank()) return userCookie
+        val harvested = harvestedCookie.ifBlank { prefs.getString("harvested_cookie", "").orEmpty() }
+        if (harvested.isNotBlank()) {
+            return if (harvested.contains("__ac_nonce=")) harvested
+            else "$harvested; __ac_nonce=${randomAlnum(21)}"
+        }
         return buildString {
             ttwid?.let { append("ttwid=$it; ") }
             append("__ac_nonce=${randomAlnum(21)}")
         }
     }
+
+    /** 从采集/用户 Cookie 提取指定字段。 */
+    private fun harvestedValue(name: String): String? {
+        val src = harvestedCookie.ifBlank { prefs.getString("harvested_cookie", "").orEmpty() }
+        if (src.isBlank()) return null
+        return Regex("(?:^|;\\s*)${Regex.escape(name)}=([^;\\s]+)").find(src)
+            ?.groupValues?.get(1)
+    }
+
+    /** 从用户 Cookie 提取指定字段（msToken / sessionid / sessionid_ss 等）。 */
+    fun cookieValue(name: String): String? {
+        if (userCookie.isBlank()) return null
+        return Regex("(?:^|;\\s*)${Regex.escape(name)}=([^;\\s]+)").find(userCookie)
+            ?.groupValues?.get(1)
+    }
+
+    /**
+     * 最优 msToken：优先用户 Cookie 中浏览器真实签发的 msToken
+     * （对 Argus 校验严格的接口通过率远高于本地随机值），否则本地生成。
+     */
+    suspend fun bestMsToken(): String =
+        cookieValue("msToken")?.takeIf { it.length >= 32 }
+            ?: harvestedValue("msToken")?.takeIf { it.length >= 32 }
+            ?: ensureMsToken()
 
     /** 本地生成 msToken（126 位字母数字 + "=="，与 myDV 一致）。 */
     fun generateMsToken(): String = randomAlnum(126) + "=="
@@ -241,9 +287,76 @@ class DouyinIdentity private constructor(context: Context) {
         local
     }
 
-    /** 一次性初始化全部身份（ttwid + msToken）。 */
+    /** 一次性初始化全部身份（WebView 真实 Cookie + ttwid + msToken）。 */
     suspend fun ensureAll() {
+        ensureWebCookies()
         ensureTtwid()
         ensureMsToken()
+    }
+
+    /**
+     * 用 WebView 访问 douyin.com 采集真实 Cookie（ttwid / msToken / s_v_web_id /
+     * UIFID 等）。这是 myDV 的身份初始化链路：严格校验的接口（作者作品等）
+     * 依赖真实签发的 Cookie，本地随机身份无法通过。
+     * 采集结果持久化，之后启动无需重复加载页面。
+     */
+    private suspend fun ensureWebCookies() = withContext(Dispatchers.IO) {
+        if (userCookie.isNotBlank()) return@withContext
+        if (!harvestedCookie.isBlank()) return@withContext
+        if (harvestAttempted) return@withContext
+        harvestAttempted = true
+        val cookie = harvestCookiesBlocking()
+        if (cookie.isNotBlank()) {
+            harvestedCookie = cookie
+            prefs.edit().putString("harvested_cookie", cookie).apply()
+            // 同步 ttwid，供直播等其它链路使用
+            Regex("ttwid=([^;\\s]+)").find(cookie)?.groupValues?.get(1)?.let {
+                if (ttwid.isNullOrBlank()) ttwid = it
+            }
+            Log.d(TAG, "webview cookies harvested (${cookie.length} chars)")
+        }
+    }
+
+    private fun harvestCookiesBlocking(): String {
+        val latch = CountDownLatch(1)
+        var cookie = ""
+        val main = Handler(Looper.getMainLooper())
+        main.post {
+            try {
+                CookieManager.getInstance().setAcceptCookie(true)
+                // 此前已采集过真实 Cookie 时直接复用，不再加载页面
+                val existing = CookieManager.getInstance()
+                    .getCookie("https://www.douyin.com/").orEmpty()
+                if (existing.contains("ttwid=") && existing.contains("msToken=")) {
+                    cookie = existing
+                    latch.countDown()
+                    return@post
+                }
+                val webView = WebView(appContext)
+                webView.settings.javaScriptEnabled = true
+                webView.settings.domStorageEnabled = true
+                webView.webViewClient = object : WebViewClient() {
+                    override fun onPageFinished(view: WebView, url: String) {
+                        cookie = CookieManager.getInstance()
+                            .getCookie("https://www.douyin.com/").orEmpty()
+                        latch.countDown()
+                        view.postDelayed({ view.destroy() }, 1500)
+                    }
+                }
+                webView.loadUrl("https://www.douyin.com/?recommend=1")
+                main.postDelayed({
+                    if (cookie.isBlank()) {
+                        cookie = CookieManager.getInstance()
+                            .getCookie("https://www.douyin.com/").orEmpty()
+                    }
+                    latch.countDown()
+                }, 7000)
+            } catch (e: Throwable) {
+                Log.w(TAG, "webview harvest failed: ${e.message}")
+                latch.countDown()
+            }
+        }
+        latch.await(10, TimeUnit.SECONDS)
+        return cookie
     }
 }
