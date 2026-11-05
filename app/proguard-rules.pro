@@ -19,3 +19,9 @@
 -dontwarn org.conscrypt.**
 -dontwarn org.bouncycastle.**
 -dontwarn org.openjsse.**
+
+# ── QuickJS wrapper（源码内置 com.whl.quickjs.**）────────────────
+# libquickjs.so 通过 JNI 按类名查找 JSArray / JSObject / QuickJSContext 等，
+# R8 改名会导致 ClassNotFoundException → SIGABRT（quickjs 线程直接 abort）
+-keep class com.whl.quickjs.** { *; }
+-dontwarn com.whl.quickjs.**
