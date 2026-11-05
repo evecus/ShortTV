@@ -1,7 +1,10 @@
-name: Build Release (arm64)
+name: Build Release
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main, master]
+  
 
 jobs:
   build:
@@ -25,7 +28,8 @@ jobs:
         run: |
           printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/app.keystore"
 
-      - name: Build release APK (arm64-v8a)
+      # 双架构打进同一个 APK：ndk.abiFilters += [arm64-v8a, armeabi-v7a]
+      - name: Build release APK (arm64-v8a + armeabi-v7a)
         env:
           KEYSTORE_PATH: ${{ runner.temp }}/app.keystore
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
@@ -33,13 +37,13 @@ jobs:
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
           chmod +x gradlew
-          ./gradlew :app:assembleRelease -Pabi=arm64-v8a --stacktrace
+          ./gradlew :app:assembleRelease -Pabi=arm64-v8a,armeabi-v7a --stacktrace
 
       - name: Rename APK
         run: |
           VERSION=$(grep -oP 'versionName\s*=\s*"\K[^"]+' app/build.gradle.kts || echo "unknown")
           mkdir -p dist
-          cp app/build/outputs/apk/release/*.apk "dist/ShortTV-${VERSION}-arm64-v8a-release.apk"
+          cp app/build/outputs/apk/release/*.apk "dist/ShortTV-release.apk"
           ls -l dist
 
       - name: Upload to GitHub Release (tag builds only)

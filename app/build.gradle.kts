@@ -22,8 +22,8 @@ android {
         applicationId = "com.shorttv.app"
         minSdk = 23
         targetSdk = 35
-        versionCode = 17
-        versionName = "1.4.6"
+        versionCode = 1
+        versionName = "1.0.0"
 
         if (abiFilter.isNotEmpty()) {
             ndk {
@@ -45,7 +45,9 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            // R8 压缩 + 资源收缩：剔除 Compose / icons-extended / media3 未用部分
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
