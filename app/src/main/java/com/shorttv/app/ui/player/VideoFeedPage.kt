@@ -129,17 +129,20 @@ fun FeedPlayerPage(
 
     // ---------- 播放器 ----------
     val playUrl = remember(aweme.awemeId) { aweme.video.resolvePlayUrl() }
-    // 横屏视频：手机端完整显示（FIT，上下留黑边，类抖音），并提供「全屏观看」
-    val isLandscapeVideo = aweme.video.width > 0 && aweme.video.height > 0 &&
-        aweme.video.width > aweme.video.height
-    var landscapeFullscreen by remember(aweme.awemeId) { mutableStateOf(false) }
-    // 显示策略：
-    // - TV 横屏：一律完整显示（竖屏视频左右留黑边，横屏视频恰好铺满）
-    // - 手机竖屏：竖屏视频铺满（ZOOM，无黑边）；横屏视频/全屏观看时完整显示
-    val fitMode = when (LocalDeviceMode.current) {
-        DeviceMode.TV -> true
-        DeviceMode.MOBILE -> isLandscapeVideo || landscapeFullscreen
+    // 实际视频尺寸：优先用解码器报告的真实尺寸（已考虑旋转 / 像素宽高比），
+    // 元数据 width/height 可能缺失或不准，仅作首帧前的兜底。
+    var videoAspect by remember(aweme.awemeId) {
+        mutableStateOf(
+            if (aweme.video.width > 0 && aweme.video.height > 0) {
+                aweme.video.width.toFloat() / aweme.video.height.toFloat()
+            } else 0f
+        )
     }
+    val isLandscapeVideo = videoAspect > 1f
+    var landscapeFullscreen by remember(aweme.awemeId) { mutableStateOf(false) }
+    // 显示策略（所有设备一致）：始终 FIT —— 按「视频宽高比 vs 容器宽高比」自适应：
+    // - 视频比容器更宽：视频居中，上下黑边（手机刷横屏视频）
+    // - 视频比容器更窄：视频居中，左右黑边（电视刷竖屏视频）
     val player = remember(aweme.awemeId) {
         // 抖音 play/ 中转地址对 Referer/Cookie 敏感（无 Referer 直接 403），
         // 必须为 ExoPlayer 的数据源注入 UA + Referer（对齐 Web 端请求头）。
@@ -190,6 +193,11 @@ fun FeedPlayerPage(
             override fun onIsPlayingChanged(playing: Boolean) {
                 isPlaying = playing
                 onPipActiveChanged(playing)
+            }
+            override fun onVideoSizeChanged(size: androidx.media3.common.VideoSize) {
+                if (size.width > 0 && size.height > 0) {
+                    videoAspect = size.width * size.pixelWidthHeightRatio / size.height
+                }
             }
             override fun onPlaybackStateChanged(state: Int) {
                 if (state == Player.STATE_READY) {
@@ -363,17 +371,13 @@ fun FeedPlayerPage(
                     PlayerView(ctx).apply {
                         useController = false
                         setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
-                        resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                        resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
                         setKeepContentOnPlayerReset(true)
                     }
                 },
                 update = { view ->
                     view.player = player
-                    view.resizeMode = if (fitMode) {
-                        AspectRatioFrameLayout.RESIZE_MODE_FIT
-                    } else {
-                        AspectRatioFrameLayout.RESIZE_MODE_ZOOM
-                    }
+                    view.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
                 },
                 modifier = Modifier.fillMaxSize()
             )
@@ -383,7 +387,7 @@ fun FeedPlayerPage(
         AsyncImage(
             model = aweme.video.coverUrl,
             contentDescription = null,
-            contentScale = ContentScale.Crop,
+            contentScale = ContentScale.Fit,
             modifier = Modifier
                 .fillMaxSize()
                 .alpha(if (firstFrameReady) 0f else 1f)
@@ -440,10 +444,9 @@ fun FeedPlayerPage(
                 val density = androidx.compose.ui.platform.LocalDensity.current
                 val screenW = constraints.maxWidth.toFloat()
                 val screenH = constraints.maxHeight.toFloat()
-                val videoAspect = aweme.video.width.toFloat() / aweme.video.height.toFloat()
                 val screenAspect = if (screenH > 0f) screenW / screenH else 9f / 16f
                 // FIT 模式下视频实际显示高度，入口贴在视频下缘
-                val shownHeight = if (videoAspect < screenAspect) screenW / videoAspect else screenH
+                val shownHeight = if (videoAspect > screenAspect) screenW / videoAspect else screenH
                 val chipY = with(density) {
                     ((screenH - shownHeight) / 2f + shownHeight).toDp() + 10.dp
                 }
