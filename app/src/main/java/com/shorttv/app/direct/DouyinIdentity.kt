@@ -199,7 +199,8 @@ class DouyinIdentity private constructor(private val appContext: Context) {
                 val name = first.substring(0, i).trim()
                 val value = first.substring(i + 1).trim()
                 when (name) {
-                    "msToken" -> if (value.length == 120 || value.length == 128) {
+                    // mssdk 签发值实测 184 位（120/128 是旧认知），放宽为 >=100
+                    "msToken" -> if (value.length >= 100) {
                         merged[name] = value
                         msToken = value
                         prefs.edit().putBoolean("msToken_issued", true).apply()
@@ -321,26 +322,25 @@ class DouyinIdentity private constructor(private val appContext: Context) {
                 .post(body.toRequestBody("text/plain;charset=UTF-8".toMediaTypeOrNull()))
                 .build()
             http.newCall(request).execute().use { resp ->
-                // myDV 2.3.43：真实 msToken 经 Set-Cookie 下发（长度 120/128）
+                // mssdk 签发的真实 msToken：实测（2026-11）为 184 位（含 == 结尾），
+                // 不能按 120/128 校验（会拒掉全部真实签发，回退本地随机）。
+                fun accept(token: String): Boolean {
+                    if (token.length < 100) return false
+                    msToken = token
+                    prefs.edit().putBoolean("msToken_issued", true).apply()
+                    DirectDiagnostics.recordMsToken("mssdk 签发（长度 ${token.length}）", token)
+                    Log.d(TAG, "msToken issued by mssdk (len=${token.length})")
+                    return true
+                }
+                resp.header("x-ms-token")?.trim()?.takeIf { it.isNotEmpty() }?.let { if (accept(it)) return@withContext it }
                 for (sc in resp.headers("Set-Cookie")) {
                     val m = Regex("(?:^|;\\s*)msToken=([^;\\s]+)").find(sc)
-                    val token = m?.groupValues?.get(1)
-                    if (token != null && (token.length == 120 || token.length == 128)) {
-                        msToken = token
-                        prefs.edit().putBoolean("msToken_issued", true).apply()
-                        DirectDiagnostics.recordMsToken("mssdk 签发", token)
-                        Log.d(TAG, "msToken issued by mssdk (len=${token.length})")
-                        return@withContext token
-                    }
+                    val token = m?.groupValues?.get(1)?.trim()
+                    if (!token.isNullOrEmpty() && accept(token)) return@withContext token
                 }
                 val text = resp.body?.string().orEmpty()
                 Regex("\"msToken\"\\s*:\\s*\"([^\"]+)\"").find(text)?.groupValues?.get(1)?.let { token ->
-                    if (token.length >= 100) {
-                        msToken = token
-                        prefs.edit().putBoolean("msToken_issued", true).apply()
-                        Log.d(TAG, "msToken from mssdk body (len=${token.length})")
-                        return@withContext token
-                    }
+                    if (token.length >= 100 && accept(token)) return@withContext token
                 }
                 Log.w(TAG, "mssdk token response has no msToken (http=${resp.code})")
                 DirectDiagnostics.recordMsToken("mssdk 响应无签发（http=${resp.code}）", null)
