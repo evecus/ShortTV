@@ -3,11 +3,14 @@
 参考 **myDV 2.1.37**（`com.github.mytv.dv`，抖音第三方电视端）逆向分析结果，
 从零实现的同构 Android TV 应用。Kotlin + Jetpack Compose + Media3 ExoPlayer。
 
+> 本版本已同步移植 **myDV 2.3.43** 的新增「幕光方案」Web 面板（见下文
+> [手机扫码 Web 面板](#手机扫码-web-面板mydv-2343-幕光方案)）。
+
 ## 交付物
 
 | 文件 | 说明 |
 |---|---|
-| `ShortTV-1.2.0-debug.apk` | 可直接 sideload 安装的调试包（27.4 MB，minSdk 23 / targetSdk 35，默认抖音直连） |
+| `ShortTV-1.3.0-debug.apk` | 可直接 sideload 安装的调试包（27.8 MB，minSdk 23 / targetSdk 35，默认抖音直连，v1.3.0 新增手机扫码 Web 面板） |
 
 
 | `ShortTV/` | 完整 Gradle 工程源码（28 个 Kotlin 文件） |
@@ -26,7 +29,27 @@
   - 手机：竖屏锁定（不随传感器旋转）、底部导航栏、上下滑动切换视频、信息栏/互动栏常驻、控制栏点击唤出
   - TV：横屏全屏、顶部页签栏、沉浸播放（正常播放时隐藏顶部/底部/互动等全部遮挡，仅保留弹幕；按键/点按唤出），全屏时遥控器上下键直接切换视频
 - **设置**：数据源切换（直连 / 自建服务端 / 演示，含直连通性测试）、服务端地址配置、播放/弹幕/小窗开关
+- **手机扫码 Web 面板**（myDV 2.3.43 幕光方案）：搜索页扫码远程输入关键词、设置页扫码推送登录 Cookie（见下文）
 - **首启协议弹窗**、**PiP 小窗**（按 Home 自动进入）、崩溃场景兜底
+
+## 手机扫码 Web 面板（myDV 2.3.43 幕光方案）
+
+对齐 myDV 2.3.43 的局域网 Web 面板体系，解决 TV 端文字输入与登录两大痛点：
+
+| 端口 | 服务 | 页面 / 协议 |
+|---|---|---|
+| 9979 | HTTP | `/` 或 `/search` → `search.html` 搜索输入页 |
+| 9980 | WebSocket | `{type: input\|search\|tv_text, text}` 文字实时同步 |
+| 9978 | HTTP | `/submit` → `submit.html` 登录信息推送页；`POST /api/submit` 提交 `{cookie, security_payload, private_key}` |
+
+- **远程搜索输入**：搜索页展示二维码卡片，手机与电视同一网络时扫码打开网页，
+  在网页中输入的关键词实时回显到电视搜索框（电视侧改动也实时广播回手机），
+  网页点「搜索」直接触发电视搜索。卡片显示连接状态（连接中 / 已就绪 / 服务不可用）与已连接设备数。
+- **登录信息推送**：设置页「登录 Cookie」区展示二维码，手机/电脑打开网页粘贴抖音
+  网页版 Cookie 后点推送，电视自动保存并应用到直连 API（无需遥控器输入长 Cookie）。
+- 实现位于 `app/.../remote/`（`WebPanelServers.kt` 纯 JDK HTTP + WebSocket 服务器、
+  `RemoteInputHub.kt` 全局状态枢纽），页面资产在 `app/src/main/assets/web/`，
+  启动于 `ShortTVApplication.onCreate`。二维码由 zxing core 生成。
 
 ## 数据来源
 
