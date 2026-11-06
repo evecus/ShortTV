@@ -31,7 +31,8 @@ class AbogusSigner private constructor(private val appContext: Context) {
 
     companion object {
         private const val TAG = "AbogusSigner"
-        private const val INIT_TIMEOUT_MS = 20_000L
+        // 低端电视（Android 9 / 32 位）CPU 慢，bdms SDK 初始化可能超过 20s
+        private const val INIT_TIMEOUT_MS = 30_000L
         private const val SIGN_TIMEOUT_MS = 15_000L
 
         @Volatile
@@ -73,6 +74,10 @@ class AbogusSigner private constructor(private val appContext: Context) {
                 future.get(INIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
             } catch (e: Throwable) {
                 Log.e(TAG, "init failed", e)
+                DirectDiagnostics.recordJs(
+                    ready = false,
+                    error = e.message ?: e.javaClass.simpleName,
+                )
                 false
             }
         }
@@ -99,6 +104,7 @@ class AbogusSigner private constructor(private val appContext: Context) {
             ) as? Boolean ?: false
             if (!bdmsOk) {
                 Log.e(TAG, "window.bdms.init not available")
+                DirectDiagnostics.recordJs(false, "bdms SDK 未加载")
                 return false
             }
 
@@ -107,6 +113,7 @@ class AbogusSigner private constructor(private val appContext: Context) {
             Log.d(TAG, "initABogus() -> $initOk")
             if (!initOk) {
                 Log.e(TAG, "initABogus() returned false - bdms SDK _v not available")
+                DirectDiagnostics.recordJs(false, "initABogus() 失败")
                 return false
             }
 
@@ -115,6 +122,7 @@ class AbogusSigner private constructor(private val appContext: Context) {
             ) as? Boolean ?: false
             if (!fnOk) {
                 Log.e(TAG, "getABogus / get_ab not available after init")
+                DirectDiagnostics.recordJs(false, "getABogus 未定义")
                 return false
             }
 
@@ -128,12 +136,14 @@ class AbogusSigner private constructor(private val appContext: Context) {
             Log.d(TAG, "ac signer (sign.js) ready=$acSignerReady")
 
             ready = true
+            DirectDiagnostics.recordJs(true)
             Log.d(TAG, "QuickJS a_bogus runtime initialised successfully (a_bogus only)")
             true
         } catch (e: Throwable) {
             Log.e(TAG, "initBlocking failed", e)
             ready = false
             acSignerReady = false
+            DirectDiagnostics.recordJs(false, e.message ?: e.javaClass.simpleName)
             false
         }
     }

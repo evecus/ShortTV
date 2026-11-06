@@ -575,12 +575,14 @@ class DouyinDirectApi(
                     logRiskControl(path, resp, body)
                     if (!resp.isSuccessful) {
                         Log.w(TAG, "$path HTTP ${resp.code}: ${body.take(200)}")
+                        DirectDiagnostics.recordFeed("$path HTTP ${resp.code}")
                         return@use null
                     }
                     body
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "$path failed: ${e.message}")
+                DirectDiagnostics.recordFeed("$path 异常：${e.message}")
                 null
             }
         }
@@ -594,6 +596,7 @@ class DouyinDirectApi(
         val code = resp.header("bd-tt-error-code") ?: return
         if (code.isNotBlank() && code != "0") {
             Log.w(TAG, "RISK CONTROL $path bd-tt-error-code=$code body=${body.take(150)}")
+            DirectDiagnostics.recordFeed("风控拦截 $path（bd-tt-error-code=$code）")
         }
     }
 
@@ -693,9 +696,15 @@ class DouyinDirectApi(
         identity.ensureAll()
         if (preferMobileFeed) {
             val app = runCatching { appFeed(count, minItems, maxRounds) }
-                .onFailure { Log.w(TAG, "app feed failed: ${it.message}") }
+                .onFailure {
+                    Log.w(TAG, "app feed failed: ${it.message}")
+                    DirectDiagnostics.recordFeed("app feed 异常：${it.message}")
+                }
                 .getOrNull()
-            if (app != null && app.items.isNotEmpty()) return app
+            if (app != null && app.items.isNotEmpty()) {
+                DirectDiagnostics.recordFeed("app feed 成功 ${app.items.size} 条")
+                return app
+            }
             Log.w(TAG, "app feed unavailable, fallback to web tab/feed")
         }
         val acc = LinkedHashMap<String, Aweme>()
@@ -708,18 +717,30 @@ class DouyinDirectApi(
                 if (lastCursor > 0) put("cursor", lastCursor.toString())
             }
             val body = signedWebGet("/aweme/v1/web/tab/feed/", params)
-                ?: return DirectPage(acc.values.toList(), hasMore, lastCursor)
+                ?: run {
+                    DirectDiagnostics.recordFeed(
+                        "tab/feed 签名请求失败（HTTP 错误或 JS 引擎未就绪）",
+                    )
+                    return DirectPage(acc.values.toList(), hasMore, lastCursor)
+                }
             val resp = json.decodeFromString<FeedResp>(body)
             hasMore = resp.hasMore == 1 || hasMore
             val items = (resp.awemeList.ifEmpty { resp.data })
-            if (items.isEmpty()) return DirectPage(acc.values.toList(), hasMore, lastCursor)
+            if (items.isEmpty()) {
+                DirectDiagnostics.recordFeed("tab/feed 返回空 aweme_list（疑似风控/弱身份）")
+                return DirectPage(acc.values.toList(), hasMore, lastCursor)
+            }
             parseAwemes(items).forEach { aweme ->
                 if (aweme.awemeId !in acc) acc[aweme.awemeId] = aweme
             }
             val next = if (resp.maxCursor > 0) resp.maxCursor else if (resp.cursor > 0) resp.cursor else 0
             if (next > 0) lastCursor = next
-            if (acc.size >= minItems) return DirectPage(acc.values.toList(), hasMore, lastCursor)
+            if (acc.size >= minItems) {
+                DirectDiagnostics.recordFeed("tab/feed 成功 ${acc.size} 条")
+                return DirectPage(acc.values.toList(), hasMore, lastCursor)
+            }
         }
+        DirectDiagnostics.recordFeed("tab/feed 累计 ${acc.size} 条（轮次用尽）")
         return DirectPage(acc.values.toList(), hasMore, lastCursor)
     }
 

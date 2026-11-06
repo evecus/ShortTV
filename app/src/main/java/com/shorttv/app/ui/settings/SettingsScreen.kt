@@ -50,6 +50,9 @@ import com.shorttv.app.ui.components.QrPanelCard
 import com.shorttv.app.remote.RemoteInputHub
 import com.shorttv.app.remote.WebPanelServers
 import com.shorttv.app.data.remote.ApiClient
+import com.shorttv.app.direct.DirectDiagnostics
+import androidx.compose.runtime.produceState
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.LaunchedEffect
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -410,6 +413,36 @@ fun SettingsScreen(
             Text("清除播放记录", color = Color(0xFFF2F2F5), style = MaterialTheme.typography.bodyLarge)
         }
 
+        Spacer(Modifier.height(24.dp))
+
+        // ---------- 直连诊断 ----------
+        SectionTitle("直连诊断")
+        val diagLines by produceState(
+            initialValue = DirectDiagnostics.lines(),
+            producer = {
+                value = DirectDiagnostics.lines()
+                while (true) {
+                    kotlinx.coroutines.delay(3000)
+                    value = DirectDiagnostics.lines()
+                }
+            }
+        )
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(10.dp))
+                .background(Color(0xFF1B1B22))
+                .padding(horizontal = 16.dp, vertical = 14.dp)
+        ) {
+            diagLines.forEach { line ->
+                Text(
+                    text = line,
+                    color = Color(0xFFA9A9B8),
+                    style = MaterialTheme.typography.labelSmall
+                )
+                Spacer(Modifier.height(6.dp))
+            }
+        }
         Spacer(Modifier.height(24.dp))
 
         // ---------- 关于 ----------

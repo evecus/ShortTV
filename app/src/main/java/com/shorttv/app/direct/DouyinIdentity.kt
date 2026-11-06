@@ -327,6 +327,7 @@ class DouyinIdentity private constructor(private val appContext: Context) {
                     if (token != null && (token.length == 120 || token.length == 128)) {
                         msToken = token
                         prefs.edit().putBoolean("msToken_issued", true).apply()
+                        DirectDiagnostics.recordMsToken("mssdk 签发", token)
                         Log.d(TAG, "msToken issued by mssdk (len=${token.length})")
                         return@withContext token
                     }
@@ -349,6 +350,7 @@ class DouyinIdentity private constructor(private val appContext: Context) {
             msToken = it
             prefs.edit().putBoolean("msToken_issued", false).apply()
         }
+        DirectDiagnostics.recordMsToken("本地随机（弱身份）", local)
         Log.d(TAG, "msToken generated locally (fallback)")
         local
     }
@@ -356,11 +358,27 @@ class DouyinIdentity private constructor(private val appContext: Context) {
     private val MSSDK_UA: String =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
 
-    /** 一次性初始化全部身份（WebView 真实 Cookie + ttwid + msToken）。 */
+    /** 一次性初始化全部身份（ttwid + msToken + 必要时 WebView 兜底）。 */
     suspend fun ensureAll() {
-        ensureWebCookies()
         ensureTtwid()
         ensureMsToken()
+        // myDV 2.3.43 无 WebView 链路：仅当 mssdk 签发失败且没有任何已采集/用户
+        // 身份时才动用 WebView 采集（电视低端机加载 douyin.com 可能阻塞 10-17s）
+        if (!prefs.getBoolean("msToken_issued", false) &&
+            userCookie.isBlank() && harvestedCookie.isBlank()
+        ) {
+            ensureWebCookies()
+        }
+        DirectDiagnostics.recordIdentity(
+            ttwid = !ttwid.isNullOrBlank(),
+            uifid = uifid.length >= 16,
+            source = when {
+                userCookie.isNotBlank() -> "用户扫码 Cookie"
+                harvestedCookie.isNotBlank() -> "WebView/Set-Cookie 采集"
+                prefs.getBoolean("msToken_issued", false) -> "mssdk 签发"
+                else -> "本地生成（弱身份）"
+            },
+        )
     }
 
     /**
