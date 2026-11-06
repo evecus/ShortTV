@@ -22,8 +22,8 @@ android {
         applicationId = "com.shorttv.app"
         minSdk = 23
         targetSdk = 35
-        versionCode = 3
-        versionName = "1.3.1"
+        versionCode = 4
+        versionName = "1.3.2"
 
         if (abiFilter.isNotEmpty()) {
             ndk {
@@ -72,6 +72,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     packaging {

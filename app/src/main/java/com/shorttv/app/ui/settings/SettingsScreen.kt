@@ -50,6 +50,7 @@ import com.shorttv.app.ui.components.QrPanelCard
 import com.shorttv.app.remote.RemoteInputHub
 import com.shorttv.app.remote.WebPanelServers
 import com.shorttv.app.data.remote.ApiClient
+import com.shorttv.app.BuildConfig
 import com.shorttv.app.direct.DirectDiagnostics
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.getValue
@@ -452,7 +453,7 @@ fun SettingsScreen(
             Spacer(Modifier.width(10.dp))
             Column {
                 Text(
-                    text = "ShortTV 1.0.0",
+                    text = "ShortTV ${BuildConfig.VERSION_NAME}",
                     color = Color(0xFFF2F2F5),
                     style = MaterialTheme.typography.bodyLarge
                 )

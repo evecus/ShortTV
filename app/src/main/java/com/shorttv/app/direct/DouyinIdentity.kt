@@ -342,9 +342,16 @@ class DouyinIdentity private constructor(private val appContext: Context) {
                     }
                 }
                 Log.w(TAG, "mssdk token response has no msToken (http=${resp.code})")
+                DirectDiagnostics.recordMsToken("mssdk 响应无签发（http=${resp.code}）", null)
             }
         } catch (e: Exception) {
             Log.w(TAG, "mssdk token fetch failed: ${e.message}")
+            DirectDiagnostics.recordMsToken("mssdk 不可达：${e.message?.take(60)}", null)
+        }
+        // 回退 1：WebView 采集 / 用户 Cookie 中的真实 msToken（电视端 mssdk
+        // 域名可能不通，但 douyin.com WebView 采集成功时 Cookie 里已有真 token）
+        if (applyHarvestedMsToken()) {
+            msToken?.let { return@withContext it }
         }
         val local = generateMsToken().also {
             msToken = it
@@ -362,12 +369,20 @@ class DouyinIdentity private constructor(private val appContext: Context) {
     suspend fun ensureAll() {
         ensureTtwid()
         ensureMsToken()
-        // myDV 2.3.43 无 WebView 链路：仅当 mssdk 签发失败且没有任何已采集/用户
-        // 身份时才动用 WebView 采集（电视低端机加载 douyin.com 可能阻塞 10-17s）
-        if (!prefs.getBoolean("msToken_issued", false) &&
-            userCookie.isBlank() && harvestedCookie.isBlank()
+        // myDV 2.3.43 无 WebView 链路：mssdk 签发成功或已有真实 Cookie 时不动 WebView。
+        // 电视端 mssdk 域名可能不通（DNS/TLS 受限），此时依赖 WebView 采集兜底。
+        val issued = prefs.getBoolean("msToken_issued", false)
+        if (!issued && userCookie.isBlank() &&
+            !harvestedCookie.contains("msToken=")
         ) {
+            if (harvestedCookie.isNotBlank()) {
+                // 旧版采集的 Cookie 缺 msToken → 清掉重新采集
+                harvestedCookie = ""
+                prefs.edit().remove("harvested_cookie").apply()
+            }
+            harvestAttempted = false
             ensureWebCookies()
+            applyHarvestedMsToken()
         }
         DirectDiagnostics.recordIdentity(
             ttwid = !ttwid.isNullOrBlank(),
@@ -379,6 +394,27 @@ class DouyinIdentity private constructor(private val appContext: Context) {
                 else -> "本地生成（弱身份）"
             },
         )
+    }
+
+    /**
+     * 从已采集/用户 Cookie 中提取真实 msToken。
+     * WebView 访问 douyin.com 成功时 Cookie 里通常带有 douyin 下发的真实 msToken。
+     * @return 是否成功应用
+     */
+    private fun applyHarvestedMsToken(): Boolean {
+        for (source in listOf(userCookie, harvestedCookie)) {
+            if (source.isBlank()) continue
+            Regex("(?:^|;\\s*)msToken=([^;\\s]+)").find(source)?.groupValues?.get(1)?.let { token ->
+                if (token.length >= 100) {
+                    msToken = token
+                    prefs.edit().putBoolean("msToken_issued", false).apply()
+                    DirectDiagnostics.recordMsToken("Cookie 采集（真实）", token)
+                    Log.d(TAG, "msToken from harvested cookie (len=${token.length})")
+                    return true
+                }
+            }
+        }
+        return false
     }
 
     /**
