@@ -164,8 +164,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private var danmakuJob: Job? = null
 
     init {
-        // 手机端优先使用移动端 App 推荐流（竖屏内容为主）；TV 保持 Web tab/feed
-        directApi.preferMobileFeed = detectDeviceMode(app) == DeviceMode.MOBILE
+        // 全设备优先走移动端 App 推荐流（/aweme/v1/feed/）：无需 Web 签名、
+        // 身份校验宽松，弱身份也能过；失败自动回退 Web tab/feed。
+        // 此前 TV 被强制走 Web 接口，弱 msToken 被 Argus 拦截导致首页空数据。
+        directApi.preferMobileFeed = true
         // 数据源随设置实时切换（默认 DIRECT 直连抖音）
         viewModelScope.launch {
             settings.collectLatest { s ->

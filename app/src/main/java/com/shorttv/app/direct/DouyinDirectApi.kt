@@ -790,17 +790,24 @@ class DouyinDirectApi(
                     ).execute().use { resp ->
                         if (!resp.isSuccessful) {
                             Log.w(TAG, "appFeed HTTP ${resp.code}")
+                            DirectDiagnostics.recordFeed("app feed HTTP ${resp.code}")
                             null
                         } else {
                             resp.body?.string().orEmpty()
                         }
                     }
-                }.onFailure { Log.w(TAG, "appFeed request failed: ${it.message}") }
+                }.onFailure {
+                    Log.w(TAG, "appFeed request failed: ${it.message}")
+                    DirectDiagnostics.recordFeed("app feed 请求失败：${it.message?.take(60)}")
+                }
                     .getOrNull().orEmpty()
             }
             if (body.isBlank()) return DirectPage(acc.values.toList(), hasMore, 0L)
             val resp = runCatching { json.decodeFromString<FeedResp>(body) }
-                .onFailure { Log.w(TAG, "appFeed decode failed: ${it.message}") }
+                .onFailure {
+                    Log.w(TAG, "appFeed decode failed: ${it.message}")
+                    DirectDiagnostics.recordFeed("app feed 响应解析失败")
+                }
                 .getOrNull() ?: return DirectPage(acc.values.toList(), hasMore, 0L)
             hasMore = resp.hasMore == 1 || hasMore
             val items = parseAwemes(resp.awemeList.ifEmpty { resp.data })
