@@ -12,6 +12,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
@@ -23,10 +24,10 @@ import java.util.concurrent.TimeUnit
 /**
  * 抖音访客身份管理：ttwid / msToken / webid / user_unique_id / uifid。
  *
- * 移植自 myDV DouyinDirectApi 的身份链路：
+ * 移植自 myDV 2.3.43 的身份链路：
  * - ttwid：POST https://ttwid.bytedance.com/ttwid/union/register/ 注册访客 Cookie
- * - msToken：GET https://mssdk.bytedance.com/web/r/token 获取（失败则本地生成）
- * - webid / uifid：本地随机生成并持久化
+ * - msToken：POST https://mssdk.bytedance.com/web/r/token 携带指纹 strData 真实签发（失败则本地生成）
+ * - ttwid / msToken / UIFID / UIFID_TEMP：从抖音响应 Set-Cookie 持续采集（noteSetCookies）
  */
 class DouyinIdentity private constructor(private val appContext: Context) {
 
@@ -71,9 +72,6 @@ class DouyinIdentity private constructor(private val appContext: Context) {
     private val prefs: SharedPreferences =
         appContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
-    /** mssdk msToken 探测是否已失败（官方端点已下线，失败后不再重试）。 */
-    private var msTokenProbeFailed = false
-
     /** WebView 采集的抖音真实 Cookie（对齐 myDV 的 WebView 初始化链路）。 */
     @Volatile
     private var harvestAttempted = false
@@ -117,9 +115,10 @@ class DouyinIdentity private constructor(private val appContext: Context) {
                 prefs.edit().putString("verifyFp", it).apply()
             })
 
-    /** 优先使用 WebView 采集的真实 UIFID。 */
+    /** 优先使用 WebView 采集的真实 UIFID（其次 UIFID_TEMP，均为抖音真实下发）。 */
     val uifid: String
         get() = harvestedValue("UIFID")?.takeIf { it.length >= 16 }
+            ?: harvestedValue("UIFID_TEMP")?.takeIf { it.length >= 16 }
             ?: (prefs.getString("uifid", null) ?: randomHex(32).uppercase().also {
                 prefs.edit().putString("uifid", it).apply()
             })
@@ -174,6 +173,55 @@ class DouyinIdentity private constructor(private val appContext: Context) {
         if (src.isBlank()) return null
         return Regex("(?:^|;\\s*)${Regex.escape(name)}=([^;\\s]+)").find(src)
             ?.groupValues?.get(1)
+    }
+
+    /**
+     * 从抖音 API 响应的 Set-Cookie 持续采集身份字段（对齐 myDV 2.3.43 的 Cookie jar）：
+     * - msToken（长度 120/128）：真实签发值，随请求轮换，始终更新
+     * - UIFID / UIFID_TEMP：抖音真实下发的设备指纹，用户中心签名链依赖它
+     * 采集结果并入 harvested cookie 库并持久化。
+     */
+    fun noteSetCookies(setCookieHeaders: List<String>) {
+        if (setCookieHeaders.isEmpty()) return
+        var changed = false
+        synchronized(this) {
+            val merged = HashMap<String, String>()
+            val src = harvestedCookie.ifBlank { prefs.getString("harvested_cookie", "").orEmpty() }
+            for (pair in src.split(";")) {
+                val i = pair.indexOf('=')
+                if (i > 0) merged[pair.substring(0, i).trim()] = pair.substring(i + 1).trim()
+            }
+            for (sc in setCookieHeaders) {
+                val first = sc.substringBefore(';').trim()
+                val i = first.indexOf('=')
+                if (i <= 0) continue
+                val name = first.substring(0, i).trim()
+                val value = first.substring(i + 1).trim()
+                when (name) {
+                    "msToken" -> if (value.length == 120 || value.length == 128) {
+                        merged[name] = value
+                        msToken = value
+                        prefs.edit().putBoolean("msToken_issued", true).apply()
+                        changed = true
+                    }
+                    "UIFID", "UIFID_TEMP" -> if (value.length >= 16 && merged[name] != value) {
+                        merged[name] = value
+                        changed = true
+                        Log.d(TAG, "$name harvested from Set-Cookie (len=${value.length})")
+                    }
+                    "ttwid" -> if (value.isNotBlank() && merged[name] != value) {
+                        merged[name] = value
+                        changed = true
+                        if (ttwid.isNullOrBlank()) ttwid = value
+                    }
+                }
+            }
+            if (changed) {
+                val joined = merged.entries.joinToString("; ") { "${it.key}=${it.value}" }
+                harvestedCookie = joined
+                prefs.edit().putString("harvested_cookie", joined).apply()
+            }
+        }
     }
 
     /** 从用户 Cookie 提取指定字段（msToken / sessionid / sessionid_ss 等）。 */
@@ -246,46 +294,67 @@ class DouyinIdentity private constructor(private val appContext: Context) {
     }
 
     /**
-     * 从 mssdk 获取 msToken。失败时回退本地生成。
+     * 从 mssdk 签发真实 msToken（对齐 myDV 2.3.43）。
      *
-     * 实测（2026-10）：`mssdk.bytedance.com/web/r/token` 已 404（官方下线），
-     * 但本地生成的 126 位 msToken 实测可通过抖音风控（status_code=0），
-     * 故保留一次探测、失败即静默走本地生成，不再每次冷启动重试。
+     * POST `mssdk.bytedance.com/web/r/token?ms_appid=6383&msToken=<seed>`，
+     * 请求体携带指纹上报 JSON（dataType=8, magic=538969122, strData=指纹常量），
+     * 服务端校验通过后经 Set-Cookie 下发真实 msToken（长度 120 或 128）；
+     * 下发失败才回退本地随机（随机值在 Argus 严格接口会被拦截）。
      */
     suspend fun ensureMsToken(): String = withContext(Dispatchers.IO) {
-        msToken?.let { return@withContext it }
-        if (msTokenProbeFailed) {
-            val local = generateMsToken().also { msToken = it }
-            return@withContext local
+        // 仅复用 mssdk 真实签发的 token（本地随机也是 128 长，须用签发标记区分）
+        if (prefs.getBoolean("msToken_issued", false)) {
+            msToken?.let { return@withContext it }
         }
         try {
-            val seed = generateMsToken()
-            val url = "https://mssdk.bytedance.com/web/r/token?ms_appid=6383&msToken=" +
-                java.net.URLEncoder.encode(seed, "UTF-8")
+            val seedUrl = "https://mssdk.bytedance.com/web/r/token?ms_appid=6383&msToken=" +
+                java.net.URLEncoder.encode(MssdkFingerprint.SEED_MS_TOKEN, "UTF-8")
+            val body = "{\"dataType\":8,\"magic\":538969122,\"strData\":\"" +
+                MssdkFingerprint.STR_DATA +
+                "\",\"tspFromClient\":" + (System.currentTimeMillis() / 1000) +
+                ",\"ulr\":0,\"version\":1}"
             val request = Request.Builder()
-                .url(url)
-                .header("User-Agent", userAgent)
-                .header("Referer", "https://www.douyin.com/")
-                .get()
+                .url(seedUrl)
+                .header("User-Agent", MSSDK_UA)
+                .header("Content-Type", "text/plain;charset=UTF-8")
+                .post(body.toRequestBody("text/plain;charset=UTF-8".toMediaTypeOrNull()))
                 .build()
             http.newCall(request).execute().use { resp ->
-                val text = resp.body?.string().orEmpty()
-                val m = Regex("\"msToken\"\\s*:\\s*\"([^\"]+)\"").find(text)
-                if (m != null) {
-                    val token = m.groupValues[1]
-                    msToken = token
-                    Log.d(TAG, "msToken fetched: ${token.take(12)}...")
-                    return@withContext token
+                // myDV 2.3.43：真实 msToken 经 Set-Cookie 下发（长度 120/128）
+                for (sc in resp.headers("Set-Cookie")) {
+                    val m = Regex("(?:^|;\\s*)msToken=([^;\\s]+)").find(sc)
+                    val token = m?.groupValues?.get(1)
+                    if (token != null && (token.length == 120 || token.length == 128)) {
+                        msToken = token
+                        prefs.edit().putBoolean("msToken_issued", true).apply()
+                        Log.d(TAG, "msToken issued by mssdk (len=${token.length})")
+                        return@withContext token
+                    }
                 }
+                val text = resp.body?.string().orEmpty()
+                Regex("\"msToken\"\\s*:\\s*\"([^\"]+)\"").find(text)?.groupValues?.get(1)?.let { token ->
+                    if (token.length >= 100) {
+                        msToken = token
+                        prefs.edit().putBoolean("msToken_issued", true).apply()
+                        Log.d(TAG, "msToken from mssdk body (len=${token.length})")
+                        return@withContext token
+                    }
+                }
+                Log.w(TAG, "mssdk token response has no msToken (http=${resp.code})")
             }
         } catch (e: Exception) {
-            Log.d(TAG, "msToken fetch unavailable, use local: ${e.message}")
+            Log.w(TAG, "mssdk token fetch failed: ${e.message}")
         }
-        msTokenProbeFailed = true
-        val local = generateMsToken().also { msToken = it }
-        Log.d(TAG, "msToken generated locally")
+        val local = generateMsToken().also {
+            msToken = it
+            prefs.edit().putBoolean("msToken_issued", false).apply()
+        }
+        Log.d(TAG, "msToken generated locally (fallback)")
         local
     }
+
+    private val MSSDK_UA: String =
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
 
     /** 一次性初始化全部身份（WebView 真实 Cookie + ttwid + msToken）。 */
     suspend fun ensureAll() {

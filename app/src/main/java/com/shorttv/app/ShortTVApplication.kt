@@ -11,6 +11,7 @@ import com.shorttv.app.data.SettingsRepository
 import com.shorttv.app.direct.AbogusSigner
 import com.shorttv.app.direct.DouyinDirectApi
 import com.shorttv.app.direct.DouyinIdentity
+import com.shorttv.app.remote.WebPanelServers
 
 class ShortTVApplication : Application(), ImageLoaderFactory {
 
@@ -33,6 +34,9 @@ class ShortTVApplication : Application(), ImageLoaderFactory {
         instance = this
         settingsRepository = SettingsRepository(this)
         historyRepository = HistoryRepository(this)
+        // Web 面板服务器（myDV 2.3.43 幕光方案）：
+        // 9978 登录信息推送页 / 9979 搜索输入页 / 9980 文字同步 WS
+        WebPanelServers.start(this)
     }
 
     override fun newImageLoader(): ImageLoader {

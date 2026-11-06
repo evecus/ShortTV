@@ -46,7 +46,11 @@ import com.shorttv.app.ui.DeviceMode
 import com.shorttv.app.ui.LocalDeviceMode
 import com.shorttv.app.ui.MainViewModel
 import com.shorttv.app.ui.components.tvClickable
+import com.shorttv.app.ui.components.QrPanelCard
+import com.shorttv.app.remote.RemoteInputHub
+import com.shorttv.app.remote.WebPanelServers
 import com.shorttv.app.data.remote.ApiClient
+import androidx.compose.runtime.LaunchedEffect
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -241,6 +245,17 @@ fun SettingsScreen(
 
         // ---------- 登录 Cookie（可选） ----------
         SectionTitle("登录 Cookie（可选）")
+        // 手机扫码推送登录信息（myDV 2.3.43 幕光方案）：手机/电脑打开网页粘贴 Cookie 即可
+        val pushedCookie by RemoteInputHub.cookiePushes.collectAsStateWithLifecycle(initialValue = "")
+        LaunchedEffect(pushedCookie) {
+            if (pushedCookie.isNotBlank()) vm.setUserCookie(pushedCookie)
+        }
+        QrPanelCard(
+            title = "手机扫码推送登录信息",
+            subtitle = "手机与电视同一网络时扫码，在网页中粘贴抖音网页版 Cookie，自动推送到电视",
+            url = WebPanelServers.cookiePanelUrl()
+        )
+        Spacer(Modifier.height(10.dp))
         Text(
             text = "抖音的搜索、作者统计与作品列表、评论分页接口需要登录态。" +
                 "在手机浏览器登录 douyin.com 后，复制完整 Cookie 粘贴到这里即可解锁；" +

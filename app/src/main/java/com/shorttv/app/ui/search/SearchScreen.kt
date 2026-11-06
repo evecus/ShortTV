@@ -44,12 +44,16 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.shorttv.app.remote.RemoteInputHub
+import com.shorttv.app.remote.WebPanelServers
 import com.shorttv.app.ui.MainViewModel
 import com.shorttv.app.ui.components.EmptyHint
 import com.shorttv.app.ui.components.LoadingBox
+import com.shorttv.app.ui.components.QrPanelCard
 import com.shorttv.app.ui.components.VideoCard
 import com.shorttv.app.ui.components.tvClickable
 import com.shorttv.app.util.formatCount
+import kotlinx.coroutines.launch
 
 /**
  * 搜索页：输入框 + 热搜榜 + 联想建议 + 结果网格。
@@ -70,6 +74,24 @@ fun SearchScreen(
     val keyboard = LocalSoftwareKeyboardController.current
 
     LaunchedEffect(Unit) { vm.refreshHotWords() }
+
+    // 手机扫码远程输入（myDV 2.3.43 幕光方案）：实时回显 + 触发搜索
+    LaunchedEffect(Unit) {
+        launch {
+            RemoteInputHub.remoteInputs.collect { text ->
+                keyword = text
+                searching = text.isNotBlank()
+                vm.updateKeyword(text)
+            }
+        }
+        launch {
+            RemoteInputHub.remoteSearches.collect { text ->
+                keyword = text
+                searching = true
+                vm.doSearch(text)
+            }
+        }
+    }
 
     Column(modifier = modifier.fillMaxSize().padding(20.dp)) {
         // 搜索输入框
@@ -92,6 +114,8 @@ fun SearchScreen(
                 value = keyword,
                 onValueChange = {
                     keyword = it
+                    // 广播给已连接的手机端（实时回显「电视上显示」）
+                    RemoteInputHub.setTvText(it)
                     if (it.isNotBlank()) {
                         searching = true
                         vm.updateKeyword(it)
@@ -135,7 +159,16 @@ fun SearchScreen(
             }
         }
 
-        Spacer(Modifier.height(16.dp))
+        Spacer(Modifier.height(10.dp))
+
+        // 手机扫码远程输入入口（同一局域网内的手机/电脑打开网页即可打字）
+        QrPanelCard(
+            title = "手机扫码输入",
+            subtitle = "手机与电视同一网络时扫码，在网页中输入关键词实时同步到电视",
+            url = WebPanelServers.searchPanelUrl()
+        )
+
+        Spacer(Modifier.height(12.dp))
 
         when {
             // 联想建议

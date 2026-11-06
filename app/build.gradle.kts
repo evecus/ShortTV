@@ -22,8 +22,8 @@ android {
         applicationId = "com.shorttv.app"
         minSdk = 23
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 2
+        versionName = "1.3.0"
 
         if (abiFilter.isNotEmpty()) {
             ndk {
@@ -103,6 +103,7 @@ dependencies {
     implementation(libs.androidx.media3.session)
 
     implementation(libs.coil.compose)
+    implementation(libs.zxing.core)
     implementation(libs.okhttp)
     implementation(libs.okhttp.logging)
     implementation(libs.kotlinx.serialization.json)

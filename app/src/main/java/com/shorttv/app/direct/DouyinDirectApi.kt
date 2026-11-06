@@ -504,7 +504,10 @@ class DouyinDirectApi(
         return withContext(Dispatchers.IO) {
             try {
                 http.newCall(request).execute().use { resp ->
+                    // 采集响应 Set-Cookie 中的真实身份（msToken 轮换 / UIFID 下发）
+                    identity.noteSetCookies(resp.headers("Set-Cookie"))
                     val body = resp.body?.string().orEmpty()
+                    logRiskControl(path, resp, body)
                     if (!resp.isSuccessful) {
                         Log.w(TAG, "$path HTTP ${resp.code}: ${body.take(200)}")
                         return@use null
@@ -566,7 +569,10 @@ class DouyinDirectApi(
         return withContext(Dispatchers.IO) {
             try {
                 http.newCall(request).execute().use { resp ->
+                    // 采集响应 Set-Cookie 中的真实身份（msToken 轮换 / UIFID 下发）
+                    identity.noteSetCookies(resp.headers("Set-Cookie"))
                     val body = resp.body?.string().orEmpty()
+                    logRiskControl(path, resp, body)
                     if (!resp.isSuccessful) {
                         Log.w(TAG, "$path HTTP ${resp.code}: ${body.take(200)}")
                         return@use null
@@ -577,6 +583,17 @@ class DouyinDirectApi(
                 Log.w(TAG, "$path failed: ${e.message}")
                 null
             }
+        }
+    }
+
+    /**
+     * 风控诊断（对齐 myDV n11.k）：抖音在触发风控时返回
+     * `bd-tt-error-code` 响应头（非 0 即拦截），便于日志定位空数据原因。
+     */
+    private fun logRiskControl(path: String, resp: okhttp3.Response, body: String) {
+        val code = resp.header("bd-tt-error-code") ?: return
+        if (code.isNotBlank() && code != "0") {
+            Log.w(TAG, "RISK CONTROL $path bd-tt-error-code=$code body=${body.take(150)}")
         }
     }
 
