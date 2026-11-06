@@ -70,8 +70,9 @@ fun DanmakuOverlay(
     var canvasHeightPx by remember { mutableStateOf(0) }
 
     val density = LocalDensity.current
-    val laneHeightPx = with(density) { 46.dp.toPx() }
-    val topPadPx = with(density) { 56.dp.toPx() }
+    val laneHeightPx = with(density) { 42.dp.toPx() }
+    // 顶部留白压到最小（TV 上 25% 区域只能放 2 行就是被这里吃掉的）
+    val topPadPx = with(density) { 10.dp.toPx() }
     val laneGapNorm = 0.06f
 
     LaunchedEffect(source) {

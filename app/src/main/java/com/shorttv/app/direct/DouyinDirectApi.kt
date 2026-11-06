@@ -272,9 +272,15 @@ class DouyinDirectApi(
 
         @Serializable
         data class LiveEnterData(
+            /** 老结构：data.room */
             val room: DyLiveRoom? = null,
-            val user: DyLiveUser? = null
-        )
+            val user: DyLiveUser? = null,
+            /** 当前实测结构（2026-11）：data.data 为房间数组，取第一个元素 */
+            @SerialName("data") val roomList: List<DyLiveRoom>? = null
+        ) {
+            val resolvedRoom: DyLiveRoom? get() = room ?: roomList?.firstOrNull()
+            val resolvedUser: DyLiveUser? get() = user ?: resolvedRoom?.user
+        }
 
         @Serializable
         data class DyLiveUser(
@@ -289,7 +295,7 @@ class DouyinDirectApi(
         data class DyLiveRoom(
             @SerialName("id_str") val idStr: String = "",
             @SerialName("room_id_str") val roomIdStr: String = "",
-            /** IM 推流内部 id（webcast IM push v3 连接参数）。 */
+            /** IM 推流内部 id（enter 匿名响应通常缺失，push/v2 无需它）。 */
             @SerialName("internal_stream_id") val internalStreamId: String = "",
             val title: String = "",
             val status: Int = 0,
@@ -297,6 +303,8 @@ class DouyinDirectApi(
             @SerialName("total_user_str") val totalUserStr: String = "0",
             @SerialName("live_type_webcast") val liveType: Int = 0,
             val owner: DyLiveOwner? = null,
+            /** enter 响应中 user 挂在房间对象内（data.data[0].user）。 */
+            val user: DyLiveUser? = null,
             @SerialName("stream_url") val streamUrl: DyStreamUrl? = null,
             val cover: UrlList = UrlList()
         )
@@ -345,6 +353,9 @@ class DouyinDirectApi(
 
     /** 直播 IM WebSocket 复用同一 OkHttp（含 DoH DNS，douyin 域名解析依赖它）。 */
     val wsHttpClient: OkHttpClient get() = http
+
+    /** 直播 IM WS 签名引擎（X-MS-STUB → getMSSDKSignature）。 */
+    val jsSigner: AbogusSigner get() = signer
 
     /** 手机端优先使用移动端 App 推荐流（竖屏内容为主），由 ViewModel 按设备形态注入。 */
     @Volatile
@@ -1289,7 +1300,7 @@ class DouyinDirectApi(
      */
     suspend fun liveEnter(roomId: String): LiveRoom? {
         val resp = liveEnterResp(roomId) ?: return null
-        return resp.data?.room?.toLiveRoom(roomId)
+        return resp.data?.resolvedRoom?.toLiveRoom(roomId)
     }
 
     /**
@@ -1355,21 +1366,22 @@ class DouyinDirectApi(
     }
 
     /**
-     * 直播 IM 弹幕连接参数：房间数字 id / 游客 unique_id / internal_stream_id。
-     * 复用 enter 请求，与 liveEnter 同签名链路。
+     * 直播 IM 弹幕连接参数：房间数字 id / 游客 unique_id。
+     * 复用 enter 请求；匿名响应 room_id 在 data.data[0].id_str。
      */
     suspend fun liveImArgs(webRid: String): LiveImArgs? {
         val resp = liveEnterResp(webRid) ?: return null
-        val room = resp.data?.room
+        val room = resp.data?.resolvedRoom
         val roomIdStr = room?.roomIdStr.orEmpty().ifBlank { room?.idStr.orEmpty() }
         if (roomIdStr.isBlank()) {
-            Log.w(TAG, "liveImArgs: room_id_str 缺失")
+            Log.w(TAG, "liveImArgs: room_id 缺失")
             return null
         }
         return LiveImArgs(
             roomIdStr = roomIdStr,
-            userUniqueId = resp.data?.user?.uniqueId.orEmpty(),
-            internalStreamId = room?.internalStreamId.orEmpty(),
+            // 匿名 enter 响应没有 user.unique_id，push/v2 用固定游客 DID 即可（不绑 ttwid）
+            userUniqueId = resp.data?.resolvedUser?.uniqueId.orEmpty()
+                .ifBlank { DOUYIN_GUEST_DID },
             cookie = identity.cookieHeader(),
             ua = identity.userAgent
         )
@@ -1433,15 +1445,16 @@ class DouyinDirectApi(
     }
 }
 
+/** 直播 IM 游客 DID（DouyinLiveWebFetcher 实证固定值可用，不与 ttwid 绑定）。 */
+const val DOUYIN_GUEST_DID = "7319483754668557238"
+
 /** 直播 IM WebSocket 连接参数（LiveImClient 使用）。 */
 data class LiveImArgs(
-    /** 数字房间 id（room_id_str）。 */
+    /** 数字房间 id（data.data[0].id_str）。 */
     val roomIdStr: String,
-    /** 游客唯一 id（data.user.unique_id）。 */
+    /** 游客唯一 id（缺失时用固定 DID）。 */
     val userUniqueId: String,
-    /** 内部推流 id（data.room.internal_stream_id）。 */
-    val internalStreamId: String,
-    /** 当前身份 Cookie（非空才随 WS 请求发送）。 */
+    /** 当前身份 Cookie（WS 请求只需其中的 ttwid）。 */
     val cookie: String,
     /** 请求 UA。 */
     val ua: String

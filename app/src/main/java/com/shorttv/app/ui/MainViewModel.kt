@@ -544,7 +544,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     /** 真实弹幕收集：流结束（失败/重连耗尽/主动停止）且从未产出过消息时回退演示。 */
     private fun startImDanmaku(controller: LiveDanmakuController, scope: kotlinx.coroutines.CoroutineScope, webRid: String) {
-        val client = LiveImClient(directApi.wsHttpClient) { directApi.liveImArgs(webRid) }
+        val client = LiveImClient(directApi.wsHttpClient, directApi.jsSigner) { directApi.liveImArgs(webRid) }
         liveImClient = client
         liveImJob = scope.launch {
             val gotAny = AtomicBoolean(false)

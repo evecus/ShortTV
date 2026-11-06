@@ -3,6 +3,8 @@
 package com.shorttv.app.ui.live
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.focusable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -15,17 +17,13 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Cast
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.HighQuality
-import androidx.compose.material.icons.filled.Send
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -40,7 +38,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -71,7 +77,9 @@ private const val DOUYIN_WEB_UA =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
 
 /**
- * 直播播放页：HLS 直播流 + 弹幕 + 在线人数 + 清晰度切换 + 聊天列表。
+ * 直播播放页：沉浸全屏直播流 + 弹幕 + 清晰度切换。
+ * 顶部信息栏/底部主播信息/清晰度按钮默认隐藏（与刷视频一致），
+ * 点击屏幕或遥控器任意方向键唤出，5 秒无操作自动隐藏。
  */
 @Composable
 fun LivePlayerScreen(
@@ -85,7 +93,7 @@ fun LivePlayerScreen(
     val rooms by vm.liveRooms.collectAsStateWithLifecycle()
     val settings by vm.settings.collectAsStateWithLifecycle()
     var room by remember { mutableStateOf<LiveRoom?>(null) }
-    var showChat by remember { mutableStateOf(true) }
+    var controlsVisible by remember { mutableStateOf(false) }
     var showQuality by remember { mutableStateOf(false) }
     var roomLoadFailed by remember { mutableStateOf(false) }
     val context = LocalContext.current
@@ -169,7 +177,47 @@ fun LivePlayerScreen(
         onDispose { vm.stopLiveDanmaku() }
     }
 
-    Box(modifier = modifier.fillMaxSize().background(Color.Black)) {
+    // 沉浸模式：点击屏幕/遥控器按键唤出控制层，5 秒无操作自动隐藏；
+    // 清晰度面板打开期间保持显示
+    val chromeVisible = controlsVisible || showQuality
+    LaunchedEffect(controlsVisible) {
+        if (controlsVisible) {
+            delay(5000)
+            controlsVisible = false
+        }
+    }
+
+    val focusRequester = remember { FocusRequester() }
+    LaunchedEffect(liveRoom.roomId) {
+        androidx.compose.runtime.withFrameNanos { }
+        runCatching { focusRequester.requestFocus() }
+    }
+
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .background(Color.Black)
+            .focusRequester(focusRequester)
+            .focusable()
+            .pointerInput(liveRoom.roomId) {
+                detectTapGestures(onTap = { controlsVisible = !controlsVisible })
+            }
+            .onKeyEvent { event ->
+                if (event.type == KeyEventType.KeyDown) {
+                    when (event.key) {
+                        Key.DirectionUp, Key.DirectionDown,
+                        Key.DirectionLeft, Key.DirectionRight,
+                        Key.DirectionCenter, Key.Enter -> {
+                            if (!chromeVisible) {
+                                controlsVisible = true
+                                true
+                            } else false
+                        }
+                        else -> false
+                    }
+                } else false
+            }
+    ) {
         // 直播画面
         if (player != null) {
             AndroidView(
@@ -197,7 +245,8 @@ fun LivePlayerScreen(
             modifier = Modifier.fillMaxSize()
         )
 
-        // 顶部：返回 + 房间信息（手机端避开系统状态栏）
+        // 顶部：返回 + 房间信息（手机端避开系统状态栏）；沉浸时隐藏
+        if (chromeVisible) {
         val deviceMode = com.shorttv.app.ui.LocalDeviceMode.current
         val topInset = if (deviceMode == com.shorttv.app.ui.DeviceMode.MOBILE) {
             Modifier.statusBarsPadding()
@@ -270,11 +319,7 @@ fun LivePlayerScreen(
                 label = "小窗",
                 onClick = { onEnterPip() }
             )
-            LiveIconButton(
-                icon = if (showChat) Icons.Filled.Close else Icons.Filled.Send,
-                label = if (showChat) "收起聊天" else "展开聊天",
-                onClick = { showChat = !showChat }
-            )
+        }
         }
 
         // 清晰度面板
@@ -306,7 +351,8 @@ fun LivePlayerScreen(
             }
         }
 
-        // 底部主播信息
+        // 底部主播信息（沉浸时隐藏）
+        if (chromeVisible) {
         Row(
             modifier = Modifier
                 .align(Alignment.BottomStart)
@@ -354,36 +400,6 @@ fun LivePlayerScreen(
                 Text("关注", color = Color.White, style = MaterialTheme.typography.labelLarge)
             }
         }
-
-        // 右侧聊天列表
-        if (showChat) {
-            Column(
-                modifier = Modifier
-                    .align(Alignment.BottomEnd)
-                    .padding(end = 16.dp, bottom = 24.dp)
-                    .width(300.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(Color(0x99000000))
-                    .padding(12.dp)
-            ) {
-                Text(
-                    text = "直播间聊天",
-                    color = Color(0xFFA9A9B8),
-                    style = MaterialTheme.typography.labelMedium
-                )
-                Spacer(Modifier.height(6.dp))
-                val recent = danmakuController.items.takeLast(6).reversed()
-                recent.forEach { item ->
-                    Text(
-                        text = "${item.userNickname}：${item.content}",
-                        color = Color(0xE6FFFFFF),
-                        style = MaterialTheme.typography.labelSmall,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.padding(vertical = 2.dp)
-                    )
-                }
-            }
         }
 
         // 缓冲指示

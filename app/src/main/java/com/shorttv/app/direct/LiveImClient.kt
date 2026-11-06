@@ -31,22 +31,29 @@ private const val WIRE_LEN = 2
 
 private val EMPTY_BYTES = ByteArray(0)
 
-/** 心跳帧（payloadType=hb / method=hb，无 logId/payload），内容固定预编码。 */
-private val HB_FRAME = encodePushFrame(PushFrame(payloadType = "hb", method = "hb")).toByteString()
+/** 心跳帧（payloadType=hb，无 logId/payload），内容固定预编码。 */
+private val HB_FRAME = encodePushFrame(PushFrame(payloadType = "hb")).toByteString()
 
-/** PushFrame：field2 varint logId / field6 payloadType / field7 method / field8 payload。 */
+/**
+ * PushFrame（字段号实测核对 douyin.proto）：
+ * field2 varint logId / field7 string payloadType / field8 bytes payload。
+ */
 private class PushFrame(
     var logId: Long = 0L,
     var payloadType: String = "",
-    var method: String = "",
     var payload: ByteArray = EMPTY_BYTES
 )
 
 /** Response 内单条消息：field1 method / field2 payload。 */
 private class ImMessage(val method: String, val payload: ByteArray)
 
-/** Response：field1 repeated Message / field5 cursor / field9 needAck。 */
-private class ImResponse(val messages: List<ImMessage>, val cursor: String, val needAck: Boolean)
+/** Response：field1 repeated Message / field2 cursor / field5 internalExt / field9 needAck。 */
+private class ImResponse(
+    val messages: List<ImMessage>,
+    val cursor: String,
+    val internalExt: String,
+    val needAck: Boolean
+)
 
 /** ChatMessage：field2 user{1 id, 3 nickname} / field3 content / field15 eventTime。 */
 private class ChatMsg(val userId: Long, val nickname: String, val content: String, val eventTime: Long)
@@ -81,8 +88,7 @@ private fun encodePushFrame(f: PushFrame): ByteArray {
         writeVarint(out, (2 shl 3).toLong())
         writeVarint(out, f.logId)
     }
-    if (f.payloadType.isNotEmpty()) writeStringField(out, 6, f.payloadType)
-    if (f.method.isNotEmpty()) writeStringField(out, 7, f.method)
+    if (f.payloadType.isNotEmpty()) writeStringField(out, 7, f.payloadType)
     if (f.payload.isNotEmpty()) writeBytesField(out, 8, f.payload)
     return out.toByteArray()
 }
@@ -141,8 +147,7 @@ private fun parsePushFrame(data: ByteArray): PushFrame {
         if (tag == 0) break
         when (tag ushr 3) {
             2 -> f.logId = r.readVarint()
-            6 -> f.payloadType = r.readString()
-            7 -> f.method = r.readString()
+            7 -> f.payloadType = r.readString()
             8 -> f.payload = r.readBytes()
             else -> r.skipField(tag)
         }
@@ -153,6 +158,7 @@ private fun parsePushFrame(data: ByteArray): PushFrame {
 private fun parseResponse(data: ByteArray): ImResponse {
     val messages = ArrayList<ImMessage>()
     var cursor = ""
+    var internalExt = ""
     var needAck = false
     val r = ProtoReader(data)
     while (!r.atEnd()) {
@@ -174,12 +180,13 @@ private fun parseResponse(data: ByteArray): ImResponse {
                 }
                 messages.add(ImMessage(method, payload))
             }
-            5 -> cursor = r.readString()
+            2 -> cursor = r.readString()
+            5 -> internalExt = r.readString()
             9 -> needAck = r.readVarint() != 0L
             else -> r.skipField(tag)
         }
     }
-    return ImResponse(messages, cursor, needAck)
+    return ImResponse(messages, cursor, internalExt, needAck)
 }
 
 private fun parseChat(data: ByteArray): ChatMsg {
@@ -218,15 +225,23 @@ private fun gunzip(data: ByteArray): ByteArray =
         .getOrElse { data }
 
 /**
- * 抖音直播弹幕 IM 客户端：webcast IM push v3 WebSocket + protobuf（协议移植自 myDV 逆向）。
+ * 抖音直播弹幕 IM 客户端：webcast IM push/v2 WebSocket + protobuf。
  *
- * 流程：enter 取 IM 参数 → wss 连接 → 心跳保持 → PushFrame{msg} 解 gzip →
- * Response → WebcastChatMessage → DanmakuItem；needAck 回 ack cursor。
+ * 握手配方经沙箱实测打通（2026-11，参照 DouyinLiveWebFetcher）：
+ * - 端点 wss://webcast5-ws-web-hl.douyin.com/webcast/im/push/v2/
+ * - 固定游客 DID（user_unique_id / wss_push_did），Cookie 只需 ttwid
+ * - 签名：取 query 中 13 个指定参数拼 `k=v,...` → MD5 → X-MS-STUB →
+ *   sign.js getMSSDKSignature → `&signature=<sig>` 追加到 URL
+ *
+ * 流程：enter 取房间数字 id → 构造 URL+签名 → wss 连接 → 心跳保持 →
+ * PushFrame{payloadType=msg} 解 gzip → Response → WebcastChatMessage →
+ * DanmakuItem；needAck 回 ack（payload=internalExt）。
  *
  * 重连：主 URL 失败立即切备用重试一次；之后最多 5 次（间隔 5s），超出关闭 flow。
  */
 class LiveImClient(
     private val http: OkHttpClient,
+    private val signer: AbogusSigner,
     private val argsProvider: suspend () -> LiveImArgs?
 ) {
     companion object {
@@ -234,9 +249,17 @@ class LiveImClient(
         private const val HEARTBEAT_MS = 10_000L
         private const val RECONNECT_DELAY_MS = 5_000L
         private const val MAX_RECONNECTS = 5
-        private const val PRIMARY_HOST = "webcast3-ws-web-lf.douyin.com"
-        private const val BACKUP_HOST = "webcast3-ws-web-lq.douyin.com"
+        private const val PRIMARY_HOST = "webcast5-ws-web-hl.douyin.com"
+        private const val BACKUP_HOST = "webcast5-ws-web-lf.douyin.com"
         private const val METHOD_CHAT = "WebcastChatMessage"
+
+        /** 签名参数表（顺序固定，DouyinLiveWebFetcher 实证）。 */
+        private val SIGN_PARAMS = listOf(
+            "live_id", "aid", "version_code", "webcast_sdk_version",
+            "room_id", "sub_room_id", "sub_channel_id", "did_rule",
+            "user_unique_id", "device_platform", "device_type", "ac",
+            "identity"
+        )
     }
 
     private val running = AtomicBoolean(false)
@@ -264,7 +287,13 @@ class LiveImClient(
                     failed = true
                     break
                 }
-                val url = buildUrl(if (usedBackup) BACKUP_HOST else PRIMARY_HOST, args)
+                val host = if (usedBackup) BACKUP_HOST else PRIMARY_HOST
+                val url = buildSignedUrl(host, args)
+                if (url == null) {
+                    lastError = IllegalStateException("IM 签名不可用")
+                    failed = true
+                    break
+                }
                 Log.i(TAG, "connecting: ${url.take(150)}")
                 val close = connectOnce(producer, url, args)
                 if (!running.get()) break
@@ -303,29 +332,61 @@ class LiveImClient(
 
     // ---------- 内部 ----------
 
-    /** IM 连接查询参数（对齐抖音 Web 端 push v3）。 */
-    private fun buildUrl(host: String, args: LiveImArgs): String {
+    /** push/v2 连接 URL（DouyinLiveWebFetcher 实证模板）+ MD5 stub 签名。 */
+    private suspend fun buildSignedUrl(host: String, args: LiveImArgs): String? {
+        val now = System.currentTimeMillis()
+        val roomId = args.roomIdStr
+        val did = args.userUniqueId.ifBlank { DOUYIN_GUEST_DID }
         val params = linkedMapOf(
             "app_name" to "douyin_web",
             "version_code" to "180800",
             "webcast_sdk_version" to "1.0.14-beta.0",
+            "update_version_code" to "1.0.14-beta.0",
             "compress" to "gzip",
             "device_platform" to "web",
             "cookie_enabled" to "true",
-            "encode_type" to "protobuf",
+            "screen_width" to "1536",
+            "screen_height" to "864",
             "browser_language" to "zh-CN",
             "browser_platform" to "Win32",
-            "browser_name" to "Chrome",
-            "browser_version" to "147.0.0.0",
-            "room_id" to args.roomIdStr,
-            "user_unique_id" to args.userUniqueId,
-            "internal_stream_id" to args.internalStreamId,
-            "cursor" to "0"
+            "browser_name" to "Mozilla",
+            "browser_version" to "5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+            "browser_online" to "true",
+            "tz_name" to "Asia/Shanghai",
+            "cursor" to "d-1_u-1_fh-7392091211001140287_t-${now}_r-1",
+            "internal_ext" to "internal_src:dim|wss_push_room_id:$roomId|wss_push_did:$did" +
+                "|first_req_ms:${now - 100}|fetch_time:$now|seq:1|wss_info:0-$now-0-0|wrds_v:7392094459690748497",
+            "host" to "https://live.douyin.com",
+            "aid" to "6383",
+            "live_id" to "1",
+            "did_rule" to "3",
+            "endpoint" to "live_pc",
+            "support_wrds" to "1",
+            "user_unique_id" to did,
+            "im_path" to "/webcast/im/fetch/",
+            "identity" to "audience",
+            "need_persist_msg_count" to "15",
+            "insert_task_id" to "",
+            "live_reason" to "",
+            "room_id" to roomId,
+            "heartbeatDuration" to "0"
         )
-        val query = params.entries.joinToString("&") {
-            "${it.key}=${java.net.URLEncoder.encode(it.value, "UTF-8")}"
+        val encoded = params.entries.joinToString("&") { (k, v) ->
+            // 与实证模板一致：空格 %20、竖线保持原样（internal_ext 结构符）
+            "$k=${java.net.URLEncoder.encode(v, "UTF-8").replace("+", "%20").replace("%7C", "|")}"
         }
-        return "wss://$host/webcast/im/push/v3/?$query"
+        // 签名：13 个指定参数取原值（未编码）拼 `k=v,k=v,...` → MD5 → X-MS-STUB
+        val stub = SIGN_PARAMS.joinToString(",") { key ->
+            "$key=${params[key].orEmpty()}"
+        }.let { DouyinIdentity.md5Lower(it) }
+        val signature = runCatching { signer.signAcSignature(stub, args.ua) }
+            .onFailure { Log.w(TAG, "signAcSignature error: ${it.message}") }
+            .getOrNull()
+        if (signature.isNullOrBlank()) {
+            Log.w(TAG, "live IM signature unavailable (stub=$stub)")
+            return null
+        }
+        return "wss://$host/webcast/im/push/v2/?$encoded&signature=$signature"
     }
 
     /** 建立一次 WS 连接并持续收帧，挂起直到断开/关闭。 */
@@ -390,10 +451,8 @@ class LiveImClient(
         Log.d(TAG, "binary frame ${data.size}B")
         runCatching {
             val frame = parsePushFrame(data)
-            val isMsg = frame.payloadType == "msg" || frame.method == "msg"
-            val isHb = frame.payloadType == "hb" || frame.method == "hb"
-            when {
-                isMsg -> {
+            when (frame.payloadType) {
+                "msg" -> {
                     val payload = gunzip(frame.payload)
                     val resp = parseResponse(payload)
                     for (m in resp.messages) {
@@ -413,16 +472,16 @@ class LiveImClient(
                         }.onFailure { Log.w(TAG, "chat parse skipped: ${it.message}") }
                     }
                     if (resp.needAck) {
+                        // ack payload=internalExt（DouyinLiveWebFetcher 实证）
                         val ack = PushFrame(
                             logId = frame.logId,
                             payloadType = "ack",
-                            method = "ack",
-                            payload = resp.cursor.toByteArray()
+                            payload = resp.internalExt.ifBlank { resp.cursor }.toByteArray()
                         )
                         ws.send(encodePushFrame(ack).toByteString())
                     }
                 }
-                isHb -> ws.send(HB_FRAME)
+                "hb" -> ws.send(HB_FRAME)
                 else -> { /* 其他消息类型忽略 */ }
             }
         }.onFailure { Log.w(TAG, "bad frame skipped: ${it.message}") }

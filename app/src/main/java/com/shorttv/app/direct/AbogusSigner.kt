@@ -149,25 +149,38 @@ class AbogusSigner private constructor(private val appContext: Context) {
     }
 
     /**
-     * 加载并预热 sign.js。失败（如 QuickJS 无 WASM 导致 acrawler 无法实例化）
-     * 时返回 false 而不抛出，保证 a_bogus 主链路可用。
+     * 加载 sign.js 并验证直播签名可用。
+     *
+     * 注意：sign.js 的 WASM 签名器初始化可能在 QuickJS 里抛异常导致 evaluate
+     * 中途失败——但 getMSSDKSignature 是函数声明，会在执行任何语句前 hoist 到
+     * 全局（node 无 WASM 环境实测同样可正常出签）。因此 evaluate 抛异常后
+     * 仍需探测函数是否存在并试签一次，可用即视为 ready。
      */
     private fun loadAcSigner(ctx: QuickJSContext): Boolean {
-        return try {
+        try {
             val signJs = readAsset("sign.js")
                 .replace("crawler = _0x5c2014", "crawler = _0x5c2014; globalThis.__ac = crawler")
-            ctx.evaluate(signJs, "sign.js")
-            Log.d(TAG, "sign.js loaded (${signJs.length} chars)")
-            // 预热：触发一次完整 acrawler 初始化（WASM 不可用时静默跳过）。
-            runCatching {
-                ctx.evaluate(
-                    "try { getMSSDKSignature('', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36') } catch(e) {}",
-                )
-            }.onFailure { Log.w(TAG, "acrawler warmup skipped: ${it.message}") }
-            true
+            try {
+                ctx.evaluate(signJs, "sign.js")
+                Log.d(TAG, "sign.js loaded (${signJs.length} chars)")
+            } catch (e: Throwable) {
+                Log.w(TAG, "sign.js evaluate threw (will probe getMSSDKSignature): ${e.message}")
+            }
         } catch (e: Throwable) {
-            Log.w(TAG, "sign.js unavailable (live __ac_signature disabled): ${e.message}")
+            Log.w(TAG, "sign.js read failed: ${e.message}")
+            return false
+        }
+        // 探测 + 试签：返回 16 位签名字符串即认为直播签名链路可用
+        return runCatching {
+            val probe = ctx.evaluate(
+                "(function(){ try { var s = getMSSDKSignature('probe', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'); return typeof s === 'string' && s.length >= 8 ? 'ok' : ('bad:' + s); } catch(e) { return 'err:' + e; } })()",
+            ) as? String
+            probe == "ok"
+        }.getOrElse {
+            Log.w(TAG, "ac signer probe failed: ${it.message}")
             false
+        }.also { ok ->
+            if (ok) Log.d(TAG, "getMSSDKSignature probe ok")
         }
     }
 

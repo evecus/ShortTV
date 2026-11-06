@@ -67,6 +67,10 @@ class DouyinIdentity private constructor(private val appContext: Context) {
             val digest = MessageDigest.getInstance("MD5").digest(input.toByteArray(Charsets.UTF_8))
             return digest.joinToString("") { "%02x".format(it) }.uppercase()
         }
+
+        /** 直播 IM WS 签名用小写 MD5（X-MS-STUB）。 */
+        fun md5Lower(input: String): String =
+            md5Upper(input).lowercase()
     }
 
     private val prefs: SharedPreferences =
