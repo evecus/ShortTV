@@ -152,10 +152,13 @@ fun LivePlayerScreen(
         onDispose { player?.removeListener(listener) }
     }
 
-    // 直播弹幕（演示模式按节拍生成）
+    // 直播弹幕（DIRECT 数据源接真实 IM 弹幕，其余为演示节拍；换房重连、退出即停）
     val danmakuController = remember { LiveDanmakuController() }
     LaunchedEffect(liveRoom.roomId) {
-        vm.startLiveDanmaku(danmakuController, this)
+        vm.startLiveDanmaku(danmakuController, this, liveRoom.roomId)
+    }
+    DisposableEffect(liveRoom.roomId) {
+        onDispose { vm.stopLiveDanmaku() }
     }
 
     Box(modifier = modifier.fillMaxSize().background(Color.Black)) {

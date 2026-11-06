@@ -280,13 +280,17 @@ class DouyinDirectApi(
         data class DyLiveUser(
             @SerialName("sec_uid") val secUid: String = "",
             val nickname: String = "",
-            @SerialName("avatar_medium") val avatarMedium: UrlList = UrlList()
+            @SerialName("avatar_medium") val avatarMedium: UrlList = UrlList(),
+            /** 游客身份唯一 id（IM WebSocket 连接参数）。 */
+            @SerialName("unique_id") val uniqueId: String = ""
         )
 
         @Serializable
         data class DyLiveRoom(
             @SerialName("id_str") val idStr: String = "",
             @SerialName("room_id_str") val roomIdStr: String = "",
+            /** IM 推流内部 id（webcast IM push v3 连接参数）。 */
+            @SerialName("internal_stream_id") val internalStreamId: String = "",
             val title: String = "",
             val status: Int = 0,
             @SerialName("user_count_str") val userCountStr: String = "0",
@@ -338,6 +342,9 @@ class DouyinDirectApi(
         .readTimeout(20, TimeUnit.SECONDS)
         .dns(DohDns)
         .build()
+
+    /** 直播 IM WebSocket 复用同一 OkHttp（含 DoH DNS，douyin 域名解析依赖它）。 */
+    val wsHttpClient: OkHttpClient get() = http
 
     /** 手机端优先使用移动端 App 推荐流（竖屏内容为主），由 ViewModel 按设备形态注入。 */
     @Volatile
@@ -1281,6 +1288,15 @@ class DouyinDirectApi(
      * 使用 __ac_signature + X-MS-STUB（msStub=MD5(请求体)）。
      */
     suspend fun liveEnter(roomId: String): LiveRoom? {
+        val resp = liveEnterResp(roomId) ?: return null
+        return resp.data?.room?.toLiveRoom(roomId)
+    }
+
+    /**
+     * enter 接口共用请求（直播页与 IM 弹幕参数共用，保持原 liveEnter 行为）。
+     * @return 原始响应 DTO，失败返回 null。
+     */
+    private suspend fun liveEnterResp(roomId: String): LiveEnterResp? {
         identity.ensureAll()
         identity.ensureTtwid()
         val params = linkedMapOf(
@@ -1329,14 +1345,34 @@ class DouyinDirectApi(
                         Log.w(TAG, "liveEnter HTTP ${resp.code}: ${body.take(200)}")
                         return@use null
                     }
-                    val r = json.decodeFromString<LiveEnterResp>(body)
-                    r.data?.room?.toLiveRoom(roomId)
+                    json.decodeFromString<LiveEnterResp>(body)
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "liveEnter failed: ${e.message}")
                 null
             }
         }
+    }
+
+    /**
+     * 直播 IM 弹幕连接参数：房间数字 id / 游客 unique_id / internal_stream_id。
+     * 复用 enter 请求，与 liveEnter 同签名链路。
+     */
+    suspend fun liveImArgs(webRid: String): LiveImArgs? {
+        val resp = liveEnterResp(webRid) ?: return null
+        val room = resp.data?.room
+        val roomIdStr = room?.roomIdStr.orEmpty().ifBlank { room?.idStr.orEmpty() }
+        if (roomIdStr.isBlank()) {
+            Log.w(TAG, "liveImArgs: room_id_str 缺失")
+            return null
+        }
+        return LiveImArgs(
+            roomIdStr = roomIdStr,
+            userUniqueId = resp.data?.user?.uniqueId.orEmpty(),
+            internalStreamId = room?.internalStreamId.orEmpty(),
+            cookie = identity.cookieHeader(),
+            ua = identity.userAgent
+        )
     }
 
     /**
@@ -1396,3 +1432,17 @@ class DouyinDirectApi(
         else -> 0
     }
 }
+
+/** 直播 IM WebSocket 连接参数（LiveImClient 使用）。 */
+data class LiveImArgs(
+    /** 数字房间 id（room_id_str）。 */
+    val roomIdStr: String,
+    /** 游客唯一 id（data.user.unique_id）。 */
+    val userUniqueId: String,
+    /** 内部推流 id（data.room.internal_stream_id）。 */
+    val internalStreamId: String,
+    /** 当前身份 Cookie（非空才随 WS 请求发送）。 */
+    val cookie: String,
+    /** 请求 UA。 */
+    val ua: String
+)

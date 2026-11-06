@@ -20,7 +20,9 @@ import com.shorttv.app.data.model.MixPage
 import com.shorttv.app.data.model.SuggestItem
 import com.shorttv.app.data.model.UserPage
 import com.shorttv.app.direct.DouyinDirectApi
+import com.shorttv.app.direct.LiveImClient
 import com.shorttv.app.ui.player.LiveDanmakuController
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -30,6 +32,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * 全局状态容器：推荐流 / 直播 / 搜索 / 用户 / 合集 / 设置。
@@ -508,8 +511,66 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch { settingsRepository.setHistoryResume(value) }
     }
 
-    /** 直播弹幕模拟生成（演示模式下按节拍推送） */
-    fun startLiveDanmaku(controller: LiveDanmakuController, scope: kotlinx.coroutines.CoroutineScope) {
+    // ---------- 直播弹幕 ----------
+
+    private var liveDanmakuJob: Job? = null
+    private var liveImJob: Job? = null
+    private var liveImClient: LiveImClient? = null
+
+    /**
+     * 直播弹幕入口：DIRECT 数据源优先接真实 IM WebSocket 弹幕
+     * （8s 内无消息或流以失败关闭则回退演示节拍），其余数据源直接走演示。
+     * @param webRid 直播间 web_rid（LiveRoom.roomId，直连模式下即 web_rid）。
+     */
+    fun startLiveDanmaku(controller: LiveDanmakuController, scope: kotlinx.coroutines.CoroutineScope, webRid: String) {
+        // 换直播间：先停旧客户端再重新 start
+        stopLiveDanmaku()
+        if (currentSource() == DataSource.DIRECT) {
+            startImDanmaku(controller, scope, webRid)
+        } else {
+            liveDanmakuJob = startDemoDanmaku(controller, scope)
+        }
+    }
+
+    /** 退出直播页时停止弹幕（取消协程并关闭 WS）。 */
+    fun stopLiveDanmaku() {
+        liveDanmakuJob?.cancel()
+        liveDanmakuJob = null
+        liveImJob?.cancel()
+        liveImJob = null
+        liveImClient?.stop()
+        liveImClient = null
+    }
+
+    /** 真实弹幕收集：流结束（失败/重连耗尽/主动停止）且从未产出过消息时回退演示。 */
+    private fun startImDanmaku(controller: LiveDanmakuController, scope: kotlinx.coroutines.CoroutineScope, webRid: String) {
+        val client = LiveImClient(directApi.wsHttpClient) { directApi.liveImArgs(webRid) }
+        liveImClient = client
+        liveImJob = scope.launch {
+            val gotAny = AtomicBoolean(false)
+            // 8s 看门狗：一条都没收到就停掉 IM，走下方回退
+            val watchdog = launch {
+                delay(8_000L)
+                if (!gotAny.get()) {
+                    Log.i("MainViewModel", "IM 弹幕 8s 无消息，停止")
+                    client.stop()
+                }
+            }
+            runCatching { client.start(webRid).collect { gotAny.set(true); controller.push(it) } }
+                .exceptionOrNull()?.let { e ->
+                    if (e is CancellationException) throw e
+                    Log.w("MainViewModel", "IM 弹幕流结束: ${e.message}")
+                }
+            watchdog.cancel()
+            if (!gotAny.get() && currentSource() == DataSource.DIRECT) {
+                Log.i("MainViewModel", "回退演示弹幕")
+                liveDanmakuJob = startDemoDanmaku(controller, scope)
+            }
+        }
+    }
+
+    /** 演示弹幕节拍（原有逻辑保留）。 */
+    private fun startDemoDanmaku(controller: LiveDanmakuController, scope: kotlinx.coroutines.CoroutineScope): Job =
         scope.launch {
             var tick = 0L
             while (true) {
@@ -518,5 +579,4 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 tick++
             }
         }
-    }
 }
