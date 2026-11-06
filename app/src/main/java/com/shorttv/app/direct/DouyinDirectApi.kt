@@ -336,6 +336,7 @@ class DouyinDirectApi(
     private val http: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(20, TimeUnit.SECONDS)
+        .dns(DohDns)
         .build()
 
     /** 手机端优先使用移动端 App 推荐流（竖屏内容为主），由 ViewModel 按设备形态注入。 */

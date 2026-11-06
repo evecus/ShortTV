@@ -437,10 +437,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---------- 设置 ----------
 
-    fun setLicenseAgreed(value: Boolean) {
-        viewModelScope.launch { settingsRepository.setLicenseAgreed(value) }
-    }
-
     fun setApiBaseUrl(value: String) {
         viewModelScope.launch {
             settingsRepository.setApiBaseUrl(value)

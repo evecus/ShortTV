@@ -19,7 +19,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -68,17 +67,8 @@ object Routes {
 @Composable
 fun AppRoot(
     vm: MainViewModel,
-    licenseAgreed: Boolean,
-    onLicenseAgreed: () -> Unit,
     onEnterPip: () -> Boolean
 ) {
-    if (!licenseAgreed) {
-        LicenseDialog(
-            onAgree = onLicenseAgreed,
-            onExit = { /* 直接退出应用 */ android.os.Process.killProcess(android.os.Process.myPid()) }
-        )
-    }
-
     val navController = rememberNavController()
     var pipActive by remember { mutableStateOf(false) }
 
@@ -165,55 +155,3 @@ fun AppRoot(
     }
 }
 
-/** 首次启动用户协议弹窗 */
-@Composable
-private fun LicenseDialog(onAgree: () -> Unit, onExit: () -> Unit) {
-    AlertDialog(
-        onDismissRequest = {},
-        containerColor = Color(0xFF1B1B22),
-        titleContentColor = Color(0xFFF2F2F5),
-        textContentColor = Color(0xFFA9A9B8),
-        title = {
-            Text(
-                text = "用户协议与隐私政策",
-                style = MaterialTheme.typography.headlineMedium
-            )
-        },
-        text = {
-            Column {
-                Text(
-                    text = "欢迎使用 ShortTV —— 短视频电视端客户端。\n\n" +
-                        "本应用所有内容均来自您配置的服务端或内置演示数据，" +
-                        "仅供个人学习、研究与观看使用。\n\n" +
-                        "继续使用即表示您同意：\n" +
-                        "1. 不将本应用用于任何违法违规用途；\n" +
-                        "2. 自行承担配置第三方服务端可能带来的风险；\n" +
-                        "3. 尊重内容版权，合理使用。",
-                    style = MaterialTheme.typography.bodyLarge
-                )
-            }
-        },
-        confirmButton = {
-            Box(
-                modifier = Modifier
-                    .tvClickable(onClick = onAgree)
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(Color(0xFFE5394F))
-                    .padding(horizontal = 20.dp, vertical = 10.dp)
-            ) {
-                Text("同意并继续", color = Color.White)
-            }
-        },
-        dismissButton = {
-            Box(
-                modifier = Modifier
-                    .tvClickable(onClick = onExit)
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(Color(0xFF2A2A34))
-                    .padding(horizontal = 20.dp, vertical = 10.dp)
-            ) {
-                Text("退出", color = Color(0xFFA9A9B8))
-            }
-        }
-    )
-}

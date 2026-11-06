@@ -83,6 +83,7 @@ class DouyinIdentity private constructor(private val appContext: Context) {
     private val http = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(15, TimeUnit.SECONDS)
+        .dns(DohDns)
         .build()
 
     /** 抖音 Web UA（与浏览器垫片保持一致）。 */

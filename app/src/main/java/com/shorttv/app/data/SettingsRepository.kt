@@ -28,7 +28,6 @@ enum class DataSource {
 
 /** 应用设置（对齐 myDV 的设置项：数据源 / 服务端 / 弹幕 / 播放 / 协议） */
 data class AppSettings(
-    val licenseAgreed: Boolean = false,
     val dataSource: DataSource = DataSource.DIRECT,
     val apiBaseUrl: String = "",
     val danmakuEnabled: Boolean = true,
@@ -46,7 +45,6 @@ data class AppSettings(
 class SettingsRepository(private val context: Context) {
 
     private object Keys {
-        val LICENSE = booleanPreferencesKey("license_agreed")
         val DATA_SOURCE = stringPreferencesKey("data_source")
         val API_BASE = stringPreferencesKey("api_base_url")
         val DANMAKU_ON = booleanPreferencesKey("danmaku_enabled")
@@ -62,7 +60,6 @@ class SettingsRepository(private val context: Context) {
 
     val settings: Flow<AppSettings> = context.dataStore.data.map { prefs ->
         AppSettings(
-            licenseAgreed = prefs[Keys.LICENSE] ?: false,
             dataSource = prefs[Keys.DATA_SOURCE]
                 ?.let { name -> DataSource.entries.firstOrNull { it.name == name } }
                 ?: DataSource.DIRECT,
@@ -77,10 +74,6 @@ class SettingsRepository(private val context: Context) {
             historyResume = prefs[Keys.RESUME] ?: true,
             userCookie = prefs[Keys.USER_COOKIE] ?: ""
         )
-    }
-
-    suspend fun setLicenseAgreed(value: Boolean) {
-        context.dataStore.edit { it[Keys.LICENSE] = value }
     }
 
     suspend fun setDataSource(value: DataSource) {

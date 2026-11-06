@@ -48,8 +48,6 @@ class MainActivity : ComponentActivity() {
                     val settings by vm.settings.collectAsStateWithLifecycle()
                     AppRoot(
                         vm = vm,
-                        licenseAgreed = settings.licenseAgreed,
-                        onLicenseAgreed = { vm.setLicenseAgreed(true) },
                         onEnterPip = ::tryEnterPip
                     )
                 }
