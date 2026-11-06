@@ -90,13 +90,14 @@ fun HomeTabsScreen(
     var selected by rememberSaveable { mutableIntStateOf(0) }
     val deviceMode = LocalDeviceMode.current
 
-    // ---- TV 沉浸模式：推荐页顶部栏自动隐藏 ----
+    // ---- TV 沉浸模式：推荐页顶部栏（返回键唤出后保持显示，仅返回键可收起） ----
     val density = LocalDensity.current
     val focusManager = LocalFocusManager.current
     var barVisible by remember { mutableStateOf(true) }      // 推荐页上顶部栏是否显示
+    var barPinned by remember { mutableStateOf(false) }      // 返回键唤出 = 钉住，焦点移动/超时不再隐藏
     var barHasFocus by remember { mutableStateOf(false) }
     var barHeight by remember { mutableStateOf(0.dp) }
-    var interaction by remember { mutableIntStateOf(0) }      // 遥控器操作后重置隐藏计时
+    var interaction by remember { mutableIntStateOf(0) }      // 遥控器操作后重置隐藏计时（仅未钉住时生效）
     var focusTick by remember { mutableIntStateOf(0) }        // 递增 = 请求把焦点交给顶部栏
     val barRequester = remember { FocusRequester() }
 
@@ -104,11 +105,12 @@ fun HomeTabsScreen(
         // 先把焦点还给播放器，否则顶部栏移除后遥控器按键会丢失
         if (barHasFocus) focusManager.moveFocus(FocusDirection.Down)
         barVisible = false
+        barPinned = false
     }
 
-    // 推荐页：顶部栏显示 5 秒无操作后自动隐藏
-    LaunchedEffect(selected, barVisible, interaction) {
-        if (deviceMode == DeviceMode.TV && selected == 0 && barVisible) {
+    // 推荐页：顶部栏显示 5 秒无操作后自动隐藏（返回键唤出的钉住状态除外，保持显示）
+    LaunchedEffect(selected, barVisible, interaction, barPinned) {
+        if (deviceMode == DeviceMode.TV && selected == 0 && barVisible && !barPinned) {
             delay(5000)
             hideBar()
         }
@@ -119,12 +121,19 @@ fun HomeTabsScreen(
             runCatching { barRequester.requestFocus() }
         }
     }
-    // 推荐页全屏播放时按返回键 = 唤出顶部栏（再按一次才退出应用）
+    // 推荐页全屏播放时按返回键 = 唤出顶部栏并钉住；焦点移动不再使其消失
     androidx.activity.compose.BackHandler(
         enabled = deviceMode == DeviceMode.TV && selected == 0 && !barVisible
     ) {
         barVisible = true
+        barPinned = true
         focusTick++
+    }
+    // 顶栏显示中再按返回键 = 收起顶栏（返回键切换）
+    androidx.activity.compose.BackHandler(
+        enabled = deviceMode == DeviceMode.TV && selected == 0 && barVisible
+    ) {
+        hideBar()
     }
 
     // 返回键：非首页页签先回首页
@@ -173,7 +182,7 @@ fun HomeTabsScreen(
             BottomNavBar(selected = selected, onSelect = { selected = it })
         }
     } else {
-        // TV：推荐页沉浸全屏（顶部栏浮层，自动隐藏）；其它页签顶部栏常驻
+        // TV：推荐页沉浸全屏（顶部栏浮层，返回键唤出后保持显示）；其它页签顶部栏常驻
         val immersive = selected == 0
         val showBar = !immersive || barVisible
         Box(modifier = Modifier.fillMaxSize().background(Color(0xFF0F0F12))) {
@@ -208,17 +217,14 @@ fun HomeTabsScreen(
                     onSelect = {
                         selected = it
                         barVisible = true
+                        barPinned = false
                         interaction++
                     },
                     selectedRequester = barRequester,
                     translucent = immersive,
                     modifier = Modifier
                         .onSizeChanged { barHeight = with(density) { it.height.toDp() } }
-                        .onFocusChanged {
-                            // 推荐页：焦点从顶部栏移走（按下键回到视频）即隐藏
-                            if (immersive && barHasFocus && !it.hasFocus) barVisible = false
-                            barHasFocus = it.hasFocus
-                        }
+                        .onFocusChanged { barHasFocus = it.hasFocus }
                         .onPreviewKeyEvent { interaction++; false }
                 )
             }

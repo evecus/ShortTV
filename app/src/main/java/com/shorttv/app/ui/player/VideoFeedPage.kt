@@ -78,6 +78,7 @@ import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
+import com.shorttv.app.PlayerRegistry
 import com.shorttv.app.data.AppSettings
 import com.shorttv.app.data.HistoryRepository
 import com.shorttv.app.data.model.Aweme
@@ -179,7 +180,12 @@ fun FeedPlayerPage(
         }
     }
     DisposableEffect(aweme.awemeId) {
-        onDispose { player.release() }
+        // 注册到全局表：Activity 退出（finish）时统一停声
+        PlayerRegistry.register(player)
+        onDispose {
+            PlayerRegistry.unregister(player)
+            player.release()
+        }
     }
 
     var isPlaying by remember { mutableStateOf(false) }
@@ -247,8 +253,17 @@ fun FeedPlayerPage(
     // 底部信息与右侧互动栏隐藏，仅保留弹幕。手机端信息栏常驻；
     // 手机「全屏观看」横屏时同样沉浸，仅保留画面与控制栏。
     val deviceMode = LocalDeviceMode.current
+    // TV：切换视频后左下角视频信息（作者/标题）显示 2 秒再自动隐藏，每次切换重新计时
+    var tvInfoVisible by remember { mutableStateOf(false) }
+    LaunchedEffect(deviceMode, isActive, aweme.awemeId) {
+        if (deviceMode != DeviceMode.TV || !isActive) return@LaunchedEffect
+        tvInfoVisible = true
+        delay(2000)
+        tvInfoVisible = false
+    }
     val chromeVisible = (deviceMode == DeviceMode.MOBILE && !landscapeFullscreen) ||
-        controlsVisible || showComments || !isActive
+        controlsVisible || showComments || !isActive ||
+        (deviceMode == DeviceMode.TV && tvInfoVisible)
 
     // 「全屏观看」：手机横屏播放，返回键 / 切换视频时恢复竖屏
     androidx.activity.compose.BackHandler(enabled = landscapeFullscreen) {
@@ -555,29 +570,35 @@ fun FeedPlayerPage(
             }
         }
 
-        // 右侧互动栏 —— TV 沉浸播放时隐藏
-        AnimatedVisibility(
-            visible = chromeVisible,
-            enter = fadeIn(tween(200)),
-            exit = fadeOut(tween(200)),
-            modifier = Modifier.align(Alignment.CenterEnd)
-        ) {
-            ActionRail(
-                avatarUrl = aweme.author.avatarUrl,
-                likeCount = aweme.statistics.diggCount + likeBump,
-                liked = liked,
-                commentCount = aweme.statistics.commentCount,
-                collected = collected,
-                collectCount = aweme.statistics.collectCount,
-                shareCount = aweme.statistics.shareCount,
-                following = following,
-                onAvatarClick = onAuthorClick,
-                onLikeClick = { toggleLike() },
-                onCommentClick = { showComments = true; onOpenComments() },
-                onCollectClick = { toggleCollect() },
-                onShareClick = { toast = "分享链接已复制（演示）" },
-                onFollowClick = { following = !following }
-            )
+        // 右侧互动栏：仅手机端渲染（TV 端一律不渲染，含切换视频时）；
+        // 手机端改为底部对齐，上移到底部描述区（作者/标题/原声 + 导航栏 inset）
+        // 上方，对齐抖音原图布局
+        if (deviceMode == DeviceMode.MOBILE) {
+            AnimatedVisibility(
+                visible = chromeVisible,
+                enter = fadeIn(tween(200)),
+                exit = fadeOut(tween(200)),
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(bottom = 180.dp)
+            ) {
+                ActionRail(
+                    avatarUrl = aweme.author.avatarUrl,
+                    likeCount = aweme.statistics.diggCount + likeBump,
+                    liked = liked,
+                    commentCount = aweme.statistics.commentCount,
+                    collected = collected,
+                    collectCount = aweme.statistics.collectCount,
+                    shareCount = aweme.statistics.shareCount,
+                    following = following,
+                    onAvatarClick = onAuthorClick,
+                    onLikeClick = { toggleLike() },
+                    onCommentClick = { showComments = true; onOpenComments() },
+                    onCollectClick = { toggleCollect() },
+                    onShareClick = { toast = "分享链接已复制（演示）" },
+                    onFollowClick = { following = !following }
+                )
+            }
         }
 
         // 控制栏
@@ -695,7 +716,7 @@ private fun ActionRail(
     modifier: Modifier = Modifier
 ) {
     Column(
-        modifier = modifier.padding(end = 12.dp, bottom = 90.dp),
+        modifier = modifier.padding(end = 12.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(16.dp)
     ) {

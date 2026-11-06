@@ -26,6 +26,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.shorttv.app.data.model.DanmakuItem
 
+/** 弹幕只允许出现在屏幕顶部该比例的高度内。 */
+private const val DANMAKU_MAX_ZONE_FRACTION = 0.25f
+
 /** 轨道上的单条弹幕（归一化坐标，与画布尺寸解耦）。 */
 private class DanmakuTrack(
     val item: DanmakuItem,
@@ -64,6 +67,7 @@ fun DanmakuOverlay(
     var frameTick by remember { mutableIntStateOf(0) }
     var lastPlaybackMs by remember { mutableLongStateOf(0L) }
     var canvasWidthPx by remember { mutableStateOf(0) }
+    var canvasHeightPx by remember { mutableStateOf(0) }
 
     val density = LocalDensity.current
     val laneHeightPx = with(density) { 46.dp.toPx() }
@@ -89,13 +93,14 @@ fun DanmakuOverlay(
             while (iter.hasNext()) {
                 val track = iter.next()
                 track.xNorm -= track.speedNormPerSec * dt
-                if (track.xNorm < -1.6f) iter.remove()
+                // 右缘完全滚出屏幕才移除，防止超长弹幕未滚完就腾出轨道
+                if (track.xNorm + track.widthNorm < -0.05f) iter.remove()
             }
         }
     }
 
     // 播放进度推进时，把进入时间窗的真实弹幕按车道注入。
-    LaunchedEffect(source, playbackPositionMs, fontSizeSp, speedFactor, enabled, canvasWidthPx) {
+    LaunchedEffect(source, playbackPositionMs, fontSizeSp, speedFactor, enabled, canvasWidthPx, canvasHeightPx) {
         val jumped = playbackPositionMs + 1_000L < lastPlaybackMs ||
             playbackPositionMs > lastPlaybackMs + 5_000L
         if (jumped) {
@@ -104,6 +109,10 @@ fun DanmakuOverlay(
         }
 
         val widthPx = canvasWidthPx
+        // 可用弹幕区域 = 屏幕顶部 25% 高度；轨道数 = 可用高度 / 单条高度（向下取整），至少 1 条
+        val zoneBottomPx = canvasHeightPx * DANMAKU_MAX_ZONE_FRACTION
+        val laneCount = maxOf(1, ((zoneBottomPx - topPadPx) / laneHeightPx).toInt())
+            .coerceAtMost(maxTrackCount)
         val lowerBound = (playbackPositionMs - 1_500L).coerceAtLeast(0L)
         val useFallbackTimeline = source.all { it.offsetTimeMs == 0L }
         source.mapIndexed { index, item ->
@@ -126,25 +135,21 @@ fun DanmakuOverlay(
                     )
                 )
                 val widthNorm = (layout.size.width.toFloat() / widthPx).coerceAtLeast(0.01f)
-                val occupied = tracks.map { it.lane }.toHashSet()
-                for (lane in 0 until maxTrackCount) {
-                    if (lane in occupied) continue
-                    val tail = tracks.filter { it.lane == lane }.maxByOrNull { it.xNorm }
-                    if (tail != null && tail.xNorm + tail.widthNorm >
-                        1.05f - laneGapNorm - widthNorm
-                    ) {
-                        // 尾部尚未腾出足够间距，避免同车道追尾
-                        continue
+                for (lane in 0 until laneCount) {
+                    // 同轨道防重叠：轨道上任一弹幕右缘未离开入轨安全线前视为忙，
+                    // 所有轨道都忙则丢弃当条（入轨后同轨道速度恒定，不会追尾）
+                    val laneBusy = tracks.any { track ->
+                        track.lane == lane && track.xNorm + track.widthNorm >
+                            1.05f - laneGapNorm
                     }
-                    // 每条车道固定速度：同车道后车不会追上前车
-                    val speed = (0.11f + 0.012f * lane) * speedFactor
+                    if (laneBusy) continue
                     tracks.add(
                         DanmakuTrack(
                             item = item,
                             layout = layout,
                             xNorm = 1.05f,
                             yPx = topPadPx + lane * laneHeightPx,
-                            speedNormPerSec = speed,
+                            speedNormPerSec = (0.11f + 0.012f * lane) * speedFactor,
                             widthNorm = widthNorm,
                             lane = lane
                         )
@@ -158,7 +163,10 @@ fun DanmakuOverlay(
     Canvas(
         modifier = modifier
             .fillMaxSize()
-            .onSizeChanged { canvasWidthPx = it.width }
+            .onSizeChanged {
+                canvasWidthPx = it.width
+                canvasHeightPx = it.height
+            }
     ) {
         @Suppress("UNUSED_EXPRESSION") frameTick
         tracks.toList().forEach { track ->

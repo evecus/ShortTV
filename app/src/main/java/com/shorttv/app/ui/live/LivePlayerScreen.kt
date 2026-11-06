@@ -56,6 +56,7 @@ import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
+import com.shorttv.app.PlayerRegistry
 import com.shorttv.app.data.model.LiveQuality
 import com.shorttv.app.data.model.LiveRoom
 import com.shorttv.app.ui.MainViewModel
@@ -137,7 +138,14 @@ fun LivePlayerScreen(
         }
     }
     DisposableEffect(liveRoom.roomId, playUrl) {
-        onDispose { player?.release() }
+        // 注册到全局表：Activity 退出（finish）时统一停声
+        player?.let { PlayerRegistry.register(it) }
+        onDispose {
+            player?.let {
+                PlayerRegistry.unregister(it)
+                it.release()
+            }
+        }
     }
 
     var isPlaying by remember { mutableStateOf(false) }
